@@ -1,0 +1,24 @@
+import { type ProviderAuthOption } from "../route/auth-options.js";
+import { type HttpOptions, type ModelID } from "../schema/index.js";
+export type { RunwayVideoOptions } from "../protocols/runway-video.js";
+export declare const id: string & import("effect/Brand").Brand<"AI.ProviderID">;
+export type Config = ProviderAuthOption<"optional"> & {
+    readonly baseURL?: string;
+    readonly headers?: Record<string, string>;
+    readonly http?: HttpOptions.Input;
+};
+export declare const configure: (input?: Config) => {
+    id: string & import("effect/Brand").Brand<"AI.ProviderID">;
+    video: (modelID: string | ModelID) => import("../video.js").VideoModel<import("../protocols/runway-video.js").RunwayVideoOptions>;
+    configure: (input?: Config) => /*elided*/ any;
+};
+export declare const provider: {
+    id: string & import("effect/Brand").Brand<"AI.ProviderID">;
+    video: (modelID: string | ModelID) => import("../video.js").VideoModel<import("../protocols/runway-video.js").RunwayVideoOptions>;
+    configure: (input?: Config) => {
+        id: string & import("effect/Brand").Brand<"AI.ProviderID">;
+        video: (modelID: string | ModelID) => import("../video.js").VideoModel<import("../protocols/runway-video.js").RunwayVideoOptions>;
+        configure: /*elided*/ any;
+    };
+};
+export declare const video: (modelID: string | ModelID) => import("../video.js").VideoModel<import("../protocols/runway-video.js").RunwayVideoOptions>;

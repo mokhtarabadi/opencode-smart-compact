@@ -1,0 +1,19 @@
+{
+  "name": "opencode-smart-compact",
+  "version": "0.1.0",
+  "description": "Lossless, V2-native context compaction for OpenCode: per-turn summaries, verbatim user messages, retrievable tool-I/O pruning.",
+  "type": "module",
+  "module": "src/index.ts",
+  "main": "src/index.ts",
+  "exports": { ".": { "import": "./src/index.ts" } },
+  "files": ["src"],
+  "keywords": ["opencode", "opencode-plugin", "context", "compaction", "llm"],
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.22",
+    "typescript": "^5.9.0"
+  }
+}
