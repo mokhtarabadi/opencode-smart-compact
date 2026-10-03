@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.opencode/memory/index.md
+tasks/.sessions/
