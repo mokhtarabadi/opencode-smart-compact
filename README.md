@@ -119,6 +119,21 @@ npm run verify:package   # validates the npm payload
 
 Source layout: `src/index.ts` (plugin entry), `plan.ts` (turn planning), `summarize.ts` (per-turn summaries), `apply.ts` (summary application), `prune.ts` (tool-result pruning), `strategies.ts` (deduplication, purge-errors), `config.ts`, `store.ts` (per-session state).
 
+## Releasing
+
+Publishing is automated with GitHub Actions and npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC). There are no tokens or secrets to manage.
+
+One-time setup:
+
+1. `npm login`, then `npm publish` once to create the package on npm.
+2. On npmjs.com, open the package → **Settings** → **Trusted Publisher** → **GitHub Actions**, and set: organization/user `mokhtarabadi`, repository `opencode-smart-compact`, workflow `publish.yml`.
+3. Recommended: **Settings** → **Publishing access** → "Require two-factor authentication and disallow tokens".
+
+Every release after that:
+
+1. Bump `version` in `package.json`.
+2. Commit and push to `main`. The workflow runs the tests and publishes only when the version is new; provenance is attached automatically.
+
 ## License
 
 MIT
