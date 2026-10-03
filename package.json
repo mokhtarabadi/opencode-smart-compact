@@ -1,16 +1,49 @@
 {
   "name": "opencode-smart-compact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lossless, V2-native context compaction for OpenCode: per-turn summaries, verbatim user messages, retrievable tool-I/O pruning.",
   "type": "module",
   "module": "src/index.ts",
   "main": "src/index.ts",
-  "exports": { ".": { "import": "./src/index.ts" } },
-  "files": ["src"],
-  "keywords": ["opencode", "opencode-plugin", "context", "compaction", "llm"],
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "context",
+    "compaction",
+    "tokens",
+    "llm"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mokhtarabadi/opencode-smart-compact.git"
+  },
+  "homepage": "https://github.com/mokhtarabadi/opencode-smart-compact#readme",
+  "bugs": {
+    "url": "https://github.com/mokhtarabadi/opencode-smart-compact/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/tests/*.test.js",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run verify:package"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0"
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.22",

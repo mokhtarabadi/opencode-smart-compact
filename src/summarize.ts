@@ -1,59 +1,79 @@
-import { assistantTurnIds, messageText } from "./apply.js";
+import type { Turn } from "./plan.js";
 import type { Ctx } from "./store.js";
-import type { Msg, SessionState } from "./types.js";
+import type { SessionState } from "./types.js";
 
-const SUMMARY_PROMPT = (turn: string) =>
-  [
+/** Keep a single turn's prompt bounded so one giant turn cannot blow the budget. */
+const MAX_TURN_CHARS = 6000;
+
+/** Build the summarization prompt for one turn. */
+function turnPrompt(turn: Turn, body: string): string {
+  return [
     "Condense the following assistant turn from a coding session into a short, high-signal summary.",
     "Keep: what the assistant did, what it decided and why, files or commands touched, and what comes next.",
     "Drop: raw tool output, repeated reasoning, and restated user text.",
     "Write 2-4 sentences, no preamble, no bullet list.",
     "",
+    "--- USER ---",
+    turn.userText.slice(0, 500),
     "--- ASSISTANT TURN ---",
-    turn,
+    body,
     "--- END TURN ---",
   ].join("\n");
+}
+
+/** Join a turn's assistant text and tool markers, bounded for the prompt. */
+function turnBody(turn: Turn): string {
+  const body = turn.assistants
+    .map((a) => a.text)
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+  return body.length > MAX_TURN_CHARS ? `${body.slice(0, MAX_TURN_CHARS)}\n…[truncated]` : body;
+}
+
+/** Deterministic fallback summary when the model output is empty. */
+function heuristic(body: string): string {
+  const oneLine = body.replace(/\s+/g, " ").trim();
+  return oneLine.length > 400 ? `${oneLine.slice(0, 400)}…` : oneLine;
+}
 
 /**
- * Summarize the oldest assistant turns, keeping the most recent `keepTurns`
- * untouched. Turns already summarized are skipped. Summaries are generated with
- * the session's own model through `ctx.generate.text` and stored by message id.
- * Failures are swallowed per turn so one bad turn never aborts a compaction.
+ * Summarize the eligible turns with the session's model through
+ * `ctx.generate.text` and store the result by assistant message id. The first
+ * assistant message of a turn carries the summary; the remaining ones are
+ * marked "absorbed" (empty string) so their prose is stripped without a
+ * duplicate summary. Turns whose assistant messages carry no prose, reasoning,
+ * or tool markers are absorbed without a model call.
+ * Failures fall back to a heuristic so compaction never fails.
  */
-export async function summarizeOldTurns(
-  ctx: Ctx,
-  messages: Msg[],
-  keepTurns: number,
-  state: SessionState,
-): Promise<number> {
-  const ids = assistantTurnIds(messages);
-  const eligible = keepTurns > 0 ? ids.slice(0, Math.max(0, ids.length - keepTurns)) : ids;
-  const byId = new Map<string, Msg>();
-  for (const msg of messages) if (msg.id) byId.set(msg.id, msg);
-
+export async function summarizeTurns(ctx: Ctx, turns: Turn[], state: SessionState): Promise<number> {
   let done = 0;
-  for (const id of eligible) {
-    if (state.summaries[id]) continue;
-    const msg = byId.get(id);
-    if (!msg) continue;
-    const text = messageText(msg);
-    if (!text) {
-      // No text (e.g. a tool-only turn): mark it summarized with a terse note
-      // so it stops consuming context without an LLM round-trip.
-      state.summaries[id] = "(tool-only turn)";
+  for (const turn of turns) {
+    const first = turn.assistants[0];
+    if (!first) continue;
+    if (first.id in state.summaries) continue;
+
+    const body = turnBody(turn);
+    if (!body) {
+      for (const assistant of turn.assistants) state.summaries[assistant.id] = "";
       done += 1;
       continue;
     }
+
+    let summary = "";
     try {
-      const out = await ctx.generate.text({ prompt: SUMMARY_PROMPT(text) });
-      const summary = (out?.text ?? "").trim();
-      if (summary) {
-        state.summaries[id] = summary;
-        done += 1;
-      }
+      const out = await ctx.generate.text({ prompt: turnPrompt(turn, body) });
+      summary = (out?.text ?? "").trim();
     } catch {
-      // Leave the turn unsummarized; a later run can retry.
+      summary = "";
     }
+    if (!summary) summary = heuristic(body);
+
+    state.summaries[first.id] = summary;
+    for (let i = 1; i < turn.assistants.length; i += 1) {
+      state.summaries[turn.assistants[i]!.id] = "";
+    }
+    done += 1;
   }
   return done;
 }

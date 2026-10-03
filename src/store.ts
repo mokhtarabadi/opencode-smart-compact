@@ -10,6 +10,16 @@ function key(sessionID: string): string {
   return `${PREFIX}${sessionID}`;
 }
 
+/** Derive the next omission id from stored keys (backward compatible). */
+function deriveNextOmissionId(omissions: Record<string, unknown>): number {
+  let max = 0;
+  for (const id of Object.keys(omissions)) {
+    const match = /^omitted-(\d+)$/.exec(id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
 /**
  * Load the persisted compaction state for a session, falling back to a fresh
  * empty state when none exists or the stored value is malformed. Storage is
@@ -19,9 +29,14 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
   const raw = await ctx.storage.get(key(sessionID));
   if (!raw || typeof raw !== "object") return emptyState();
   const value = raw as Partial<SessionState>;
+  const omissions = value.omissions ?? {};
+  const nextOmissionId =
+    typeof value.nextOmissionId === "number" && value.nextOmissionId > 0
+      ? value.nextOmissionId
+      : deriveNextOmissionId(omissions);
   return {
     summaries: value.summaries ?? {},
-    omissions: value.omissions ?? {},
+    omissions,
     omittedCalls: value.omittedCalls ?? {},
     stats: {
       prunedTokens: value.stats?.prunedTokens ?? 0,
@@ -29,6 +44,7 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       prunedParts: value.stats?.prunedParts ?? 0,
       lastRun: value.stats?.lastRun,
     },
+    nextOmissionId,
     pending: value.pending ?? null,
   };
 }

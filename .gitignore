@@ -1,4 +1,5 @@
 node_modules/
 dist/
+.test-build/
 .opencode/memory/index.md
 tasks/.sessions/
