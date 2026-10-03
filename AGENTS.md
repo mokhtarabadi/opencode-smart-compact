@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Lossless, OpenCode V2-native context compaction. User messages stay verbatim, each old assistant turn is replaced by its own summary, and bulky tool output is pruned to a notice while the original is cached and retrievable via `read_omitted_content`.
+Lossless, OpenCode V2-native context compaction. User messages stay verbatim, each old assistant turn is replaced by its own summary, and bulky tool output is pruned to a notice while the original is cached and retrievable via `read_omitted_content`. The agent can trigger compaction itself with the `compact_context` tool (shared logic in `src/actions.ts`).
 
-Stack: TypeScript ES2022, `@opencode/plugin` 2.0.22, strict `tsc --noEmit`. Entry `src/index.ts`. Modules: `apply.ts` (summary/omission application), `prune.ts` (tool-result pruning), `summarize.ts` (per-turn summaries), `store.ts` (per-session state), `types.ts` (Msg, SessionState). No transcript mutation — transform model-visible messages per request via `session.hook("context")`.
+Stack: TypeScript ES2022, `@opencode/plugin` 2.0.22, strict `tsc --noEmit`. Entry `src/index.ts`. Modules: `actions.ts` (shared compaction actions for the commands and the `compact_context` tool), `apply.ts` (summary/omission application), `config.ts` (JSONC config merge), `plan.ts` (turn grouping/selection), `prune.ts` (tool-result pruning), `strategies.ts` (dedup/purge-errors), `summarize.ts` (per-turn summaries), `store.ts` (per-session state), `types.ts` (Msg, SessionState). No transcript mutation — transform model-visible messages per request via `session.hook("context")`.
 
 ## Setup & Dev Commands
 

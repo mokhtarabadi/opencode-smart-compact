@@ -53,6 +53,15 @@ or list it in `opencode.json(c)`:
 
 Compaction is scheduled by the command and applied on the next model request.
 
+### The agent-callable tool
+
+`compact_context` lets the agent compress the session itself when the context window is under pressure, instead of waiting for the Manager to run a slash command. It reuses the exact command logic, so the two paths cannot drift.
+
+| Input | Effect |
+| --- | --- |
+| `keepTurns` (optional) | Most recent turns to keep unsummarized. Default `0` summarizes all. |
+| `mode` (optional) | `compact` (default) summarizes and prunes; `trim` prunes tool output only. |
+
 ### The omitted-content tool
 
 `read_omitted_content` returns the cached original for a Content ID (e.g. `omitted-0001`) that appears in a pruning notice. The lookup is scoped to the current session. Use it only when the original cannot be reproduced by a new tool call.

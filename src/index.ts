@@ -10,12 +10,11 @@
  * pruned to a notice while the original is cached and retrievable.
  */
 import { Plugin } from "@opencode/plugin";
+import { compactNow, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
 import { applyOmissions, pruneToolResults } from "./prune.js";
 import { applyStrategies } from "./strategies.js";
-import { summarizeTurns } from "./summarize.js";
 import { loadConfig, type SmartCompactConfig } from "./config.js";
-import { buildTurns, selectTurns, type HistoryEntry } from "./plan.js";
 import { loadState, saveState, type Ctx } from "./store.js";
 import type { Msg, SessionState } from "./types.js";
 
@@ -23,6 +22,7 @@ const COMPACT = "magic-compact";
 const TRIM = "magic-trim";
 const STATS = "magic-stats";
 const TOOL = "read_omitted_content";
+const COMPACT_TOOL = "compact_context";
 
 /** Parse an optional non-negative integer argument; throws on anything else. */
 function parseKeepTurns(text: string | undefined): number {
@@ -71,14 +71,7 @@ export default Plugin.define({
         description: "Lossless context compression (optional: number of recent turns to keep)",
         async execute({ sessionID, prompt }) {
           const keepTurns = parseKeepTurns(prompt?.text);
-          const config = await loadConfig(ctx);
-          const state = await loadState(ctx, sessionID);
-          const entries = (await ctx.session.context({ sessionID })) as unknown as HistoryEntry[];
-          const turns = buildTurns(entries);
-          const summarized = await summarizeTurns(ctx, selectTurns(turns, keepTurns), state);
-          state.stats.summarizedTurns += summarized;
-          state.pending = { mode: "compact", keepTurns };
-          await saveState(ctx, sessionID, state);
+          const summarized = await compactNow(ctx, sessionID, keepTurns);
           await notify(
             ctx,
             sessionID,
@@ -91,9 +84,7 @@ export default Plugin.define({
         description: "Prune bulky tool output only, without summarizing (optional: recent turns to keep)",
         async execute({ sessionID, prompt }) {
           const keepTurns = parseKeepTurns(prompt?.text);
-          const state = await loadState(ctx, sessionID);
-          state.pending = { mode: "trim", keepTurns };
-          await saveState(ctx, sessionID, state);
+          await scheduleTrim(ctx, sessionID, keepTurns);
         },
       });
       editor.add({
@@ -135,6 +126,47 @@ export default Plugin.define({
             content:
               record?.content ??
               `No omitted content found for Content ID: ${contentId} in this session. It may have been cleared by a newer compaction.`,
+          };
+        },
+      });
+
+      // Tool: agent-callable compaction, so the agent can free context room
+      // itself instead of waiting for the Manager to run a slash command. It
+      // reuses the exact command helpers, so the two paths cannot drift.
+      editor.add({
+        name: COMPACT_TOOL,
+        description:
+          "Compress this session's context now to free room: summarize old assistant turns (each becomes a short summary; user messages stay verbatim) and prune bulky tool output to a retrievable notice. Call it when the context window is under pressure. Optional inputs: keepTurns (most recent turns to keep unsummarized, default 0 = all), mode ('compact' default summarizes and prunes; 'trim' prunes tool output only).",
+        input: {
+          type: "object",
+          properties: {
+            keepTurns: {
+              type: "integer",
+              minimum: 0,
+              description: "Most recent turns to keep unsummarized. Default 0 summarizes all.",
+            },
+            mode: {
+              type: "string",
+              enum: ["compact", "trim"],
+              description: "'compact' (default) summarizes and prunes; 'trim' prunes tool output only.",
+            },
+          },
+          additionalProperties: false,
+        },
+        async execute(input: unknown, context) {
+          let args;
+          try {
+            args = parseCompactArgs(input);
+          } catch (error) {
+            return { content: `[smart-compact] ${(error as Error).message}` };
+          }
+          if (args.mode === "trim") {
+            await scheduleTrim(ctx, context.sessionID, args.keepTurns);
+            return { content: "[smart-compact] tool output will be trimmed on the next request." };
+          }
+          const summarized = await compactNow(ctx, context.sessionID, args.keepTurns);
+          return {
+            content: `[smart-compact] summarized ${summarized} turn(s); bulky tool output will be trimmed on the next request.`,
           };
         },
       });
