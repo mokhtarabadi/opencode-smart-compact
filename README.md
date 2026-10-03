@@ -16,7 +16,7 @@ Because the transcript is never modified, a compaction can be recomputed from st
 
 ## Features
 
-- **Turn-aware summaries** — old assistant turns are condensed per conversation turn, and the tool-call/tool-result structure is preserved so nothing is orphaned.
+- **Turn-aware summaries** — old assistant turns are condensed per conversation turn, and the tool-call/tool-result structure is preserved so nothing is orphaned. Eligible turns are batched into a single model call per compaction, so cost stays low.
 - **Verbatim user messages** — your instructions are never summarized away.
 - **Retrievable pruning** — bulky completed tool output is replaced with a notice; the original is cached and can be read back with `read_omitted_content`.
 - **Automatic strategies** — repeated identical tool calls are deduplicated (newest kept) and the arguments of stale errored tool calls are blanked.

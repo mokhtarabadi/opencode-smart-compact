@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `read_omitted_content` is scoped to the calling session's state.
 - Package renamed to `@mokhtarabadi/opencode-smart-compact` with `publishConfig.access: "public"` because the unscoped name is owned by another npm author.
 - Automated npm publishing via GitHub Actions OIDC trusted publishing (`.github/workflows/publish.yml`); publishes on push when the version is new, with no token secret.
+- Batched summarization (`src/summarize.ts`): eligible turns are summarized with one model call per bounded chunk instead of one call per turn, with a heuristic fallback for missing blocks.
 
 ### Fixed
 
