@@ -28,7 +28,7 @@ Because the transcript is never modified, a compaction can be recomputed from st
 Publish-aware install once the package is on npm:
 
 ```bash
-opencode plugin add opencode-smart-compact
+opencode plugin add @mokhtarabadi/opencode-smart-compact
 ```
 
 Or add the directory directly while developing:
@@ -40,7 +40,7 @@ opencode plugin add /absolute/path/to/opencode-smart-compact
 or list it in `opencode.json(c)`:
 
 ```json
-{ "plugins": ["opencode-smart-compact"] }
+{ "plugins": ["@mokhtarabadi/opencode-smart-compact"] }
 ```
 
 ## Usage

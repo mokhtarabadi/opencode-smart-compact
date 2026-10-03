@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Summarization runs in the command handler via `ctx.generate.text`, out of the `context` hook.
 - Omission ids are monotonic (`nextOmissionId`) and no longer collide across restarts.
 - `read_omitted_content` is scoped to the calling session's state.
+- Package renamed to `@mokhtarabadi/opencode-smart-compact` with `publishConfig.access: "public"` because the unscoped name is owned by another npm author.
 
 ### Fixed
 

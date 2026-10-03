@@ -1,5 +1,5 @@
 {
-  "name": "opencode-smart-compact",
+  "name": "@mokhtarabadi/opencode-smart-compact",
   "version": "0.2.0",
   "description": "Lossless, V2-native context compaction for OpenCode: per-turn summaries, verbatim user messages, retrievable tool-I/O pruning.",
   "type": "module",
@@ -44,6 +44,9 @@
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.22",
