@@ -3,3 +3,6 @@ dist/
 .test-build/
 .opencode/memory/index.md
 tasks/.sessions/
+
+# Custom Context MCP reports
+context-reports/
