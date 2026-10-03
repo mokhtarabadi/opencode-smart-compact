@@ -42,9 +42,13 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       prunedTokens: value.stats?.prunedTokens ?? 0,
       summarizedTurns: value.stats?.summarizedTurns ?? 0,
       prunedParts: value.stats?.prunedParts ?? 0,
+      savedTokens: value.stats?.savedTokens ?? 0,
       lastRun: value.stats?.lastRun,
+      lastRunMs: value.stats?.lastRunMs,
+      tokenizerUsed: value.stats?.tokenizerUsed,
     },
     nextOmissionId,
+    pruneMemo: value.pruneMemo ?? {},
     pending: value.pending ?? null,
   };
 }

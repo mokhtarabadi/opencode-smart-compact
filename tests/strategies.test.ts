@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG } from "../src/config.js";
-import { applyDeduplication, applyPurgeErrors, stableStringify } from "../src/strategies.js";
+import { applyDeduplication, applyPurgeErrors, applyStripReasoning, stableStringify } from "../src/strategies.js";
 import type { Msg } from "../src/types.js";
 
 function toolCall(id: string, name: string, input: unknown) {
@@ -61,4 +61,36 @@ test("applyPurgeErrors ignores recent errored calls", () => {
     { id: "a1", role: "assistant", content: [toolCall("c1", "bash", { command: "ls" }), toolResult("c1", "bash", "boom", true)] },
   ];
   assert.equal(applyPurgeErrors(messages, DEFAULT_CONFIG).pruned, 0);
+});
+
+test("applyStripReasoning drops long reasoning but keeps short text and tool structure", () => {
+  const messages: Msg[] = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "r".repeat(600) },
+        { type: "text", text: "kept prose" },
+        toolCall("c1", "bash", { command: "ls" }),
+        toolResult("c1", "bash", "ok"),
+      ],
+    },
+  ];
+  const result = applyStripReasoning(messages, DEFAULT_CONFIG);
+  assert.equal(result.pruned, 1);
+  assert.match(messages[0]!.content[0]!["text"] as string, /reasoning stripped/);
+  assert.equal(messages[0]!.content[1]!["text"], "kept prose");
+  assert.deepEqual(messages[0]!.content[2]!, toolCall("c1", "bash", { command: "ls" }));
+});
+
+test("applyStripReasoning keeps reasoning beside protected tools", () => {
+  const messages: Msg[] = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "reasoning", text: "r".repeat(600) }, toolCall("c1", "question", { q: "?" })],
+    },
+  ];
+  assert.equal(applyStripReasoning(messages, DEFAULT_CONFIG).pruned, 0);
+  assert.equal((messages[0]!.content[0]!["text"] as string).length, 600);
 });

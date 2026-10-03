@@ -5,7 +5,7 @@
  * Both mutate the model-visible messages only and never persist anything.
  */
 import type { SmartCompactConfig } from "./config.js";
-import { estimateTokens, serializeResult } from "./prune.js";
+import { estimateTokens, measureTokens, serializeResult } from "./prune.js";
 import type { Msg, Part } from "./types.js";
 
 /** Deterministic stringify with sorted object keys, so equal args compare equal. */
@@ -143,9 +143,53 @@ export function applyPurgeErrors(
   return { pruned };
 }
 
+/** Every tool name treated as protected by any section of the config. */
+function protectedNames(config: SmartCompactConfig): Set<string> {
+  return new Set([
+    ...config.pruning.protectedTools,
+    ...config.strategies.deduplication.protectedTools,
+    ...config.strategies.purgeErrors.protectedTools,
+  ]);
+}
+
+/**
+ * Drop reasoning parts longer than the configured threshold, replacing them
+ * with a short marker. Tool calls, results, and prose are untouched, and
+ * messages carrying a protected tool keep their reasoning intact.
+ */
+export function applyStripReasoning(
+  messages: Msg[],
+  config: SmartCompactConfig,
+): { pruned: number; tokens: number } {
+  let pruned = 0;
+  let tokens = 0;
+  if (!config.strategies.stripReasoning.enabled) return { pruned, tokens };
+  const threshold = Math.max(1, config.strategies.stripReasoning.thresholdChars);
+  const skip = protectedNames(config);
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    // A protected tool in this message exempts the whole message.
+    const guarded = msg.content.some((part) => {
+      const tool = name(part);
+      return tool !== undefined && skip.has(tool);
+    });
+    if (guarded) continue;
+    for (const part of msg.content) {
+      if (part.type !== "reasoning") continue;
+      const text = typeof part.text === "string" ? part.text : undefined;
+      if (!text || text.length <= threshold) continue;
+      tokens += measureTokens(text, config);
+      part.text = `[reasoning stripped — over ${threshold} chars]`;
+      pruned += 1;
+    }
+  }
+  return { pruned, tokens };
+}
+
 /** Run every enabled strategy. */
 export function applyStrategies(messages: Msg[], config: SmartCompactConfig): { pruned: number; tokens: number } {
   const dedup = applyDeduplication(messages, config);
   const purge = applyPurgeErrors(messages, config);
-  return { pruned: dedup.pruned + purge.pruned, tokens: dedup.tokens };
+  const strip = applyStripReasoning(messages, config);
+  return { pruned: dedup.pruned + purge.pruned + strip.pruned, tokens: dedup.tokens + strip.tokens };
 }

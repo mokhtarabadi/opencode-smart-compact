@@ -38,7 +38,21 @@ export interface SessionStats {
   prunedTokens: number;
   summarizedTurns: number;
   prunedParts: number;
+  /** Context tokens saved on prune passes that reused a memoized measurement. */
+  savedTokens: number;
   lastRun?: number;
+  /** Wall-clock cost of the most recent prune pass, in milliseconds. */
+  lastRunMs?: number;
+  /** Whether a real tokenizer (not the fallback) backed the last run. */
+  tokenizerUsed?: boolean;
+}
+
+/** Memoized token measurement for one tool call, keyed by content hash. */
+export interface MemoEntry {
+  /** Hash of the measured content; a content change invalidates the entry. */
+  hash: string;
+  /** Measured token cost reused on a hash hit. */
+  tokens: number;
 }
 
 /** Per-session compaction state, persisted in plugin storage. */
@@ -57,6 +71,11 @@ export interface SessionState {
   stats: SessionStats;
   /** Monotonic counter for the next omission id. */
   nextOmissionId: number;
+  /**
+   * Call id → memoized token measurement. Lets repeat passes over identical
+   * content skip remeasuring; any content change invalidates the entry.
+   */
+  pruneMemo: Record<string, MemoEntry>;
   /** A pending command request, consumed by the next context hook. */
   pending?: { mode: "compact" | "trim"; keepTurns: number } | null;
 }
@@ -66,8 +85,9 @@ export function emptyState(): SessionState {
     summaries: {},
     omissions: {},
     omittedCalls: {},
-    stats: { prunedTokens: 0, summarizedTurns: 0, prunedParts: 0 },
+    stats: { prunedTokens: 0, summarizedTurns: 0, prunedParts: 0, savedTokens: 0 },
     nextOmissionId: 1,
+    pruneMemo: {},
     pending: null,
   };
 }

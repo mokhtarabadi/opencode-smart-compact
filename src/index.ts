@@ -12,10 +12,11 @@
 import { Plugin } from "@opencode/plugin";
 import { compactNow, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
-import { applyOmissions, pruneToolResults } from "./prune.js";
+import { applyOmissions, measureTokens, pruneToolResults, serializeResult } from "./prune.js";
 import { applyStrategies } from "./strategies.js";
-import { loadConfig, type SmartCompactConfig } from "./config.js";
+import { checkBudgetGuard, loadConfig, type SmartCompactConfig } from "./config.js";
 import { loadState, saveState, type Ctx } from "./store.js";
+import { isTokenizerAvailable } from "./tokens.js";
 import type { Msg, SessionState } from "./types.js";
 
 const COMPACT = "magic-compact";
@@ -50,15 +51,49 @@ async function runPrune(
   messages: Msg[],
   config: SmartCompactConfig,
 ): Promise<SessionState> {
+  const started = Date.now();
   const state = await loadState(ctx, sessionID);
+  // Emergency budget guard runs before any mutation: an over-budget context
+  // aborts with a visible message and the stored state is left unchanged
+  // (no strategies applied, no save). A zero budget disables the guard.
+  const measured = measureVisibleCost(messages, config);
+  if (checkBudgetGuard(measured, config)) {
+    const text =
+      `[smart-compact] compaction aborted: measured ~${measured} tokens exceeds ` +
+      `the emergency budget of ${config.tokens.emergencyBudgetTokens} tokens. ` +
+      `Raise tokens.emergencyBudgetTokens (0 disables) and rerun.`;
+    console.warn(text);
+    await notify(ctx, sessionID, text);
+    return state;
+  }
   const strategies = applyStrategies(messages, config);
   const pruned = pruneToolResults(messages, state, config);
   state.stats.prunedParts += pruned.pruned + strategies.pruned;
   state.stats.prunedTokens += pruned.tokens + strategies.tokens;
+  state.stats.savedTokens += pruned.memoTokens;
   state.stats.lastRun = Date.now();
+  state.stats.lastRunMs = Date.now() - started;
+  state.stats.tokenizerUsed = isTokenizerAvailable();
   state.pending = null;
   await saveState(ctx, sessionID, state);
   return state;
+}
+
+/**
+ * Measured token cost of the model-visible tool results awaiting the prune
+ * pass. Read-only: never mutates messages or state.
+ */
+function measureVisibleCost(messages: Msg[], config: SmartCompactConfig): number {
+  let total = 0;
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type !== "tool-result") continue;
+      const result = part.result as { value?: unknown } | undefined;
+      total += measureTokens(serializeResult(result?.value), config);
+    }
+  }
+  return total;
 }
 
 export default Plugin.define({
@@ -95,7 +130,9 @@ export default Plugin.define({
           const s = state.stats;
           const text =
             `[smart-compact] pruned ~${s.prunedTokens} tokens across ${s.prunedParts} tool results; ` +
-            `summarized ${s.summarizedTurns} turns; ${Object.keys(state.omissions).length} cached omissions.`;
+            `summarized ${s.summarizedTurns} turns; ${Object.keys(state.omissions).length} cached omissions; ` +
+            `memo-saved ~${s.savedTokens ?? 0} tokens; last run ${s.lastRunMs ?? 0}ms; ` +
+            `tokenizer ${s.tokenizerUsed ? "on" : "off"}.`;
           console.log(text);
           await notify(ctx, sessionID, text);
         },
@@ -125,7 +162,8 @@ export default Plugin.define({
           return {
             content:
               record?.content ??
-              `No omitted content found for Content ID: ${contentId} in this session. It may have been cleared by a newer compaction.`,
+              `No omitted content found for Content ID: ${contentId} in this session. ` +
+                `It was cleared by a newer compaction — rerun the tool to reproduce the output instead of trusting a restore.`,
           };
         },
       });

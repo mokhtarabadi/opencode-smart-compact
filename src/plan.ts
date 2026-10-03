@@ -59,9 +59,12 @@ export function buildTurns(entries: readonly HistoryEntry[]): Turn[] {
 
 /**
  * Select the turns to summarize: everything except the most recent `keepTurns`
- * turns. `keepTurns <= 0` selects every turn.
+ * turns and the preserved recent window. `keepTurns <= 0` with no preserved
+ * window selects every turn. The preserved tail always contains the last user
+ * message, so recent context (including the latest request) is never eligible.
  */
-export function selectTurns(turns: Turn[], keepTurns: number): Turn[] {
-  if (keepTurns <= 0) return turns.slice();
-  return turns.slice(0, Math.max(0, turns.length - keepTurns));
+export function selectTurns(turns: Turn[], keepTurns: number, preserveRecentTurns = 0): Turn[] {
+  if (keepTurns <= 0 && preserveRecentTurns <= 0) return turns.slice();
+  const cut = Math.max(0, keepTurns) + Math.max(0, preserveRecentTurns);
+  return turns.slice(0, Math.max(0, turns.length - cut));
 }

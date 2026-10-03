@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `compact_context` tool: the agent can compress the session itself (summarize now, schedule pruning) instead of waiting for the Manager to run a slash command. Takes optional `keepTurns` and `mode` (`compact`/`trim`); invalid input returns a friendly message. Shared logic lives in `src/actions.ts` and backs both the tool and the `/magic-compact` / `/magic-trim` commands, so the paths cannot drift.
+- Token measurement module (`src/tokens.ts`): tokenizer-first counting with a dependency-free fallback, used only on explicit command paths; no new dependency.
+- Preserve-recent window plus truncate-tools bounds in the prune pass: recent turns and the last user message always keep full text, over-long results are cached in full with a notice.
+- Reasoning strip strategy plus fail-closed restore: long reasoning parts are replaced with a marker (protected tools exempt), and a cleared cache reports its missing Content ID instead of restoring a phantom.
+- Config validation warnings naming exact key paths, plus an emergency budget guard that aborts over-budget runs.
+- Prune memo gate keyed by call id plus content hash, with memo-saved tokens, last-run time, and tokenizer flag surfaced in `/magic-stats`.
+- QA hardening: the emergency budget guard now aborts over-budget runs in both entry paths without mutating stored state; the preserve window feeds the summarization path; the optional tokenizer loads under ESM as well as CJS; the truncate cap never bites below the task bar; the memo hash covers the full text.
 
 - Phase 0 bootstrap: Kanban dirs (`tasks/backlog`, `in-progress`, `qa`, `completed`, `archive`), `AGENTS.md` project hub, `docs/conventions.md` standards, validated `opencode.json` project config.
 - Turn-based compaction planning (`src/plan.ts`) that groups history by user boundary.

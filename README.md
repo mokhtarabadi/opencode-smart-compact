@@ -69,16 +69,21 @@ Compaction is scheduled by the command and applied on the next model request.
 ## Pruning rules
 
 - Completed tool results over the configured size limit (default 1024 chars / 128 words) are pruned to a notice; the original is cached.
+- With `pruning.useTokens`, the word thresholds double as token budgets and measured tokens decide instead of chars/words.
+- The preserve-recent window (default last 2 turns, plus always the last user message) keeps full text; sessions with no user message get no window.
+- Results over `truncateToolsChars` (default 1024) are pruned even under the size limit; `task` keeps its higher bar and is never capped below `taskMaxChars`.
 - `read` output is always pruned (reloadable).
 - `task` output uses a higher bar (default 4096 chars / 512 words).
-- `question` output is never pruned (it captures an explicit user decision).
+- `question` output is never pruned (it captures an explicit user decision); `write`, `edit`, and plan tools can join the protected list via config only.
 - `todowrite` and `skill` output is replaced with a short notice and not cached (redundant or reloadable).
 - Pending and errored calls are never pruned.
+- A pruned result whose cached original was cleared by a newer compaction fails closed: the notice names the missing Content ID and asks for a rerun instead of restoring a phantom.
 
 ## Automatic strategies
 
 - **Deduplication** — identical tool calls (same tool, same normalized arguments) keep only their most recent output; earlier ones are replaced with a notice.
 - **Purge errors** — the arguments of errored tool calls are blanked after a configurable number of turns. Error text is preserved.
+- **Reasoning strip** — reasoning parts over `thresholdChars` (default 500) are replaced with a marker. Messages carrying a protected tool keep their reasoning.
 
 Both run as part of the scheduled compaction pass.
 
@@ -104,14 +109,21 @@ Defaults are applied automatically; only override what you need.
     "discardTools": {
       "todowrite": "Successfully updated todos.",
       "skill": "Skill contents omitted after compaction; recall the skill if needed."
-    }
+    },
+    "preserveRecentTurns": 2,
+    "truncateToolsChars": 1024,
+    "useTokens": false
   },
   "strategies": {
     "deduplication": { "enabled": true, "protectedTools": ["question"] },
-    "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] }
-  }
+    "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] },
+    "stripReasoning": { "enabled": true, "thresholdChars": 500 }
+  },
+  "tokens": { "enabled": false, "emergencyBudgetTokens": 50000 }
 }
 ```
+
+`tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables), the run aborts and state is left unchanged. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
 
 ## Comparison
 
