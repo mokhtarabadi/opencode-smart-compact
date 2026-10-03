@@ -80,8 +80,10 @@ Manager order: "One gap worth your call: compaction is still Manager-run only â€
 
 **Closure executed** on Manager quote "Approved for closure": moved to `tasks/completed/`, Status `closed`. Manager chose **not to push yet**, so the tool is committed locally and not yet live in OpenCode.
 
+**Kanban cleanup note:** the qa file had already been staged by `qa_transition`, so the plain `mv` to `completed/` left a stale `tasks/qa/` copy in the index; the correct form was `git mv`. Cleaned up in the follow-up commit: the stale qa path is removed and the completed file re-referenced. The feature commit is `fcf512fd`.
+
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-**Factual Git Diff:** Stored in Commit Hash: `fcf512fd974a8535c7952d458cf95a2835513365`
+**Factual Git Diff:** Stored in Commit Hash: `36b4ee361c7e2c1f89ac7c275fe2eed25953a5ac`
 <!-- END_GIT_DIFF -->
