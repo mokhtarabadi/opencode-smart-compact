@@ -5,7 +5,7 @@
  */
 import { buildTurns, selectTurns, type HistoryEntry } from "./plan.js";
 import { summarizeTurns } from "./summarize.js";
-import { checkBudgetGuard, loadConfig } from "./config.js";
+import { isOverEmergencyBudget, loadConfig } from "./config.js";
 import { measureTokens } from "./prune.js";
 import { loadState, saveState, type Ctx } from "./store.js";
 
@@ -44,20 +44,23 @@ export function parseCompactArgs(input: unknown): CompactArgs {
  * messages stay verbatim) and schedule the tool-output prune pass for the next
  * request. Returns the number of turns summarized.
  *
- * The emergency budget guard runs before any work: an over-budget history
- * aborts with a warning and the stored state is left unchanged (returns 0,
- * nothing saved). A zero budget disables the guard.
+ * The emergency budget check runs before any work and is a warning only: an
+ * over-budget history still compacts, because refusing it would deadlock the
+ * sessions that need compaction most. A zero budget disables the warning.
  */
 export async function compactNow(ctx: Ctx, sessionID: string, keepTurns: number): Promise<number> {
   const config = await loadConfig(ctx);
   const state = await loadState(ctx, sessionID);
   const entries = (await ctx.session.context({ sessionID })) as unknown as HistoryEntry[];
-  if (checkBudgetGuard(measureHistoryCost(entries, config), config)) {
+  const measuredCost = measureHistoryCost(entries, config);
+  if (isOverEmergencyBudget(measuredCost, config)) {
+    // Warning only: an explicit compaction request must always proceed, because
+    // compaction is the remedy for an over-budget history, not a hazard.
     console.warn(
-      `[smart-compact] compaction aborted: history exceeds the emergency budget of ` +
-        `${config.tokens.emergencyBudgetTokens} tokens. Raise tokens.emergencyBudgetTokens (0 disables) and rerun.`,
+      `[smart-compact] history is over the emergency budget of ` +
+        `${config.tokens.emergencyBudgetTokens} tokens (measured ~${measuredCost}); ` +
+        `compacting anyway. Raise tokens.emergencyBudgetTokens to silence this warning.`,
     );
-    return 0;
   }
   const turns = buildTurns(entries);
   const summarized = await summarizeTurns(

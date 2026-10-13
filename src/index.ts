@@ -14,7 +14,7 @@ import { compactNow, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
 import { applyOmissions, measureTokens, pruneToolResults, serializeResult } from "./prune.js";
 import { applyStrategies } from "./strategies.js";
-import { checkBudgetGuard, loadConfig, type SmartCompactConfig } from "./config.js";
+import { isOverEmergencyBudget, loadConfig, type SmartCompactConfig } from "./config.js";
 import { loadState, saveState, type Ctx } from "./store.js";
 import { isTokenizerAvailable } from "./tokens.js";
 import type { Msg, SessionState } from "./types.js";
@@ -53,18 +53,17 @@ async function runPrune(
 ): Promise<SessionState> {
   const started = Date.now();
   const state = await loadState(ctx, sessionID);
-  // Emergency budget guard runs before any mutation: an over-budget context
-  // aborts with a visible message and the stored state is left unchanged
-  // (no strategies applied, no save). A zero budget disables the guard.
+  // Emergency budget check is a warning only. Skipping the strategies and the
+  // prune pass here would remove the only size relief a large session has, so an
+  // over-budget context still gets pruned and still gets its warning.
   const measured = measureVisibleCost(messages, config);
-  if (checkBudgetGuard(measured, config)) {
+  if (isOverEmergencyBudget(measured, config)) {
     const text =
-      `[smart-compact] compaction aborted: measured ~${measured} tokens exceeds ` +
-      `the emergency budget of ${config.tokens.emergencyBudgetTokens} tokens. ` +
-      `Raise tokens.emergencyBudgetTokens (0 disables) and rerun.`;
+      `[smart-compact] context is over the emergency budget of ` +
+      `${config.tokens.emergencyBudgetTokens} tokens (measured ~${measured}); ` +
+      `pruning anyway. Raise tokens.emergencyBudgetTokens to silence this warning.`;
     console.warn(text);
     await notify(ctx, sessionID, text);
-    return state;
   }
   const strategies = applyStrategies(messages, config);
   const pruned = pruneToolResults(messages, state, config);

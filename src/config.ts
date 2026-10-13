@@ -233,11 +233,14 @@ export function validateConfig(raw: unknown): string[] {
 }
 
 /**
- * Whether a compaction run must abort: true when the measured token cost
- * exceeds the configured emergency budget. A budget of 0 disables the
- * guard explicitly, and state is left unchanged on abort.
+ * Whether the measured token cost is over the configured emergency budget.
+ *
+ * This is a WARNING signal, never a gate: an over-budget history is exactly the
+ * history that needs compaction, so refusing to compact it deadlocks the
+ * session. Callers warn (and may notify) and then continue the work they were
+ * asked to do. A budget of 0 disables the warning explicitly.
  */
-export function checkBudgetGuard(measuredTokens: number, config: SmartCompactConfig): boolean {
+export function isOverEmergencyBudget(measuredTokens: number, config: SmartCompactConfig): boolean {
   const budget = config.tokens.emergencyBudgetTokens;
   if (typeof budget !== "number" || budget <= 0) return false;
   return measuredTokens > budget;

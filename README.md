@@ -123,7 +123,7 @@ Defaults are applied automatically; only override what you need.
 }
 ```
 
-`tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables), the run aborts and state is left unchanged. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
+`tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables) the run warns and still compacts: the budget is an early signal that a session is getting large, never a gate, because refusing to compact an over-budget session would deadlock it. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
 
 ## Comparison
 

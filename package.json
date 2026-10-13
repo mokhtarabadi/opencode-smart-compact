@@ -1,6 +1,6 @@
 {
   "name": "@mokhtarabadi/opencode-smart-compact",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lossless, V2-native context compaction for OpenCode: per-turn summaries, verbatim user messages, retrievable tool-I/O pruning.",
   "type": "module",
   "module": "src/index.ts",
