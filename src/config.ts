@@ -246,6 +246,61 @@ export function isOverEmergencyBudget(measuredTokens: number, config: SmartCompa
   return measuredTokens > budget;
 }
 
+/**
+ * Budget level for the hybrid meter UI (O1 D1).
+ * normal below warn ratio, warn at 70 percent, emergency at 90 percent.
+ * Display only — never changes prune behavior by itself.
+ */
+export type BudgetLevel = "normal" | "warn" | "emergency";
+
+/** Visible budget state: used plus limit plus clamped ratio plus level. */
+export interface BudgetState {
+  usedTokens: number;
+  limitTokens: number;
+  ratio: number;
+  level: BudgetLevel;
+}
+
+/** Warn display threshold: 70 percent of budget. */
+export const BUDGET_WARN_RATIO = 0.7;
+
+/** Emergency display threshold: 90 percent of budget. */
+export const BUDGET_EMERGENCY_RATIO = 0.9;
+
+/**
+ * Fixed prune weights for O1 D2 (stable, testable order).
+ * Tool results prune first, old summaries second, large omissions third.
+ * User turns and active decisions are never in this table — they never prune.
+ */
+export const PRUNE_WEIGHTS = {
+  "tool-result": 100,
+  summary: 50,
+  omission: 10,
+} as const;
+
+/**
+ * Pure budget state reader for the meter UI.
+ * Returns ratio clamped 0 to 1 and level by fixed thresholds.
+ * Safe divide: non-positive limit yields ratio 0 and normal level.
+ */
+export function getBudgetState(usedTokens: number, limitTokens: number): BudgetState {
+  // Guard non-finite or non-positive limits first — no budget means no pressure.
+  if (typeof usedTokens !== "number" || !Number.isFinite(usedTokens)) usedTokens = 0;
+  if (typeof limitTokens !== "number" || !Number.isFinite(limitTokens) || limitTokens <= 0) {
+    // No measurable limit: report empty usage, never warn.
+    return { usedTokens: Math.max(0, usedTokens), limitTokens, ratio: 0, level: "normal" };
+  }
+  // Clamp negative usage to zero, overuse to ratio 1.
+  const safeUsed = Math.max(0, usedTokens);
+  const raw = safeUsed / limitTokens;
+  // Clamp ratio into display range.
+  const ratio = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+  // Fixed thresholds: emergency wins over warn.
+  const level: BudgetLevel =
+    ratio >= BUDGET_EMERGENCY_RATIO ? "emergency" : ratio >= BUDGET_WARN_RATIO ? "warn" : "normal";
+  return { usedTokens: safeUsed, limitTokens, ratio, level };
+}
+
 async function readConfigFile(path: string): Promise<unknown | undefined> {
   try {
     const text = await readFile(path, "utf8");

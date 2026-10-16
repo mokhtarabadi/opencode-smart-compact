@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, type SmartCompactConfig } from "./config.js";
+import { DEFAULT_CONFIG, PRUNE_WEIGHTS, type SmartCompactConfig } from "./config.js";
 import { countTokens } from "./tokens.js";
 import type { Msg, OmissionRecord, Part, SessionState } from "./types.js";
 
@@ -174,6 +174,9 @@ export function pruneToolResults(
   let memoHits = 0;
   let memoTokens = 0;
   const kept = preserveWindow(messages, config.pruning.preserveRecentTurns);
+  // O1 D2: collect eligible tool results first, then prune in fixed-cost rank.
+  // User turns never enter candidates — only tool-result kind is ranked here.
+  const eligible: { part: Part; callId: string; name: string | undefined; text: string }[] = [];
   for (let index = 0; index < messages.length; index += 1) {
     const msg = messages[index]!;
     if (!Array.isArray(msg.content)) continue;
@@ -199,6 +202,32 @@ export function pruneToolResults(
       const overTruncateCap = cap > 0 && text.length > cap;
       if (!shouldPrune(name, text, config) && !overTruncateCap) continue;
 
+      eligible.push({ part, callId, name, text });
+    }
+  }
+  // Rank by fixed cost: tool-result weight first, larger payload first.
+  // All candidates here are tool-result kind — rank still orders by size.
+  // Duplicate callIds never collapse: ranking uses a unique per-entry id
+  // (callId plus index suffix) and prunes via stored entry reference.
+  const ranked = rankPruneCandidates(
+    eligible.map((e, entryIndex) => ({
+      id: `${e.callId}#${entryIndex}`,
+      kind: "tool-result" as const,
+      sizeTokens: estimateTokens(e.text),
+    })),
+  );
+  const byRankId = new Map(ranked.map((c) => [c.id, c]));
+  // Map rank ids back to eligible indices via suffix parse (stable, no collapse).
+  const order = ranked
+    .map((c) => Number(c.id.split("#").pop()))
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < eligible.length);
+  for (const entryIndex of order) {
+    const entry = eligible[entryIndex]!;
+    // Entry always exists — guard for type safety only.
+    if (!entry) continue;
+    // Keep rank id linkage explicit for audit (no Map keyed by callId remains).
+    void byRankId;
+    const { part, callId, name, text } = entry;
       const id = nextOmissionId(state);
       // Reuse the memoized measurement when the content is unchanged; the
       // memo only ever affects the reported cost, never the prune decision.
@@ -214,7 +243,6 @@ export function pruneToolResults(
       part.result = { type: "text", value: omissionNotice(id, name, saved) };
       pruned += 1;
       tokens += saved;
-    }
   }
   return { pruned, tokens, memoHits, memoTokens };
 }
@@ -265,4 +293,40 @@ export function missingOmissionNotice(id: string): string {
     `[omitted tool output unavailable — the cached original for Content ID: ${id} ` +
     `was cleared by a newer compaction. Rerun the tool to reproduce it.]`
   );
+}
+
+/**
+ * Prune candidate kind for fixed-cost ordering (O1 D2).
+ * Only these three kinds ever prune — user turns and active decisions
+ * are filtered out before ranking and never reach this table.
+ */
+export type PruneKind = "tool-result" | "summary" | "omission";
+
+/** One rankable prune candidate with stable id plus kind plus size. */
+export interface PruneCandidate {
+  id: string;
+  kind: PruneKind;
+  sizeTokens: number;
+}
+
+/**
+ * Pure fixed-cost rank for prune candidates (O1 D2).
+ * Sorts by weight desc (tool-result 100, summary 50, omission 10),
+ * then sizeTokens desc. Never mutates input. Stable for equal keys.
+ * User-turn or decision kinds are not in PruneKind — filter them before calling.
+ */
+export function rankPruneCandidates(candidates: readonly PruneCandidate[]): PruneCandidate[] {
+  // Copy first so input order is preserved for stable ties.
+  const copy = [...candidates];
+  // Weight lookup is fixed from config — no adaptive learning in O1.
+  const weight = (kind: PruneKind): number => PRUNE_WEIGHTS[kind] ?? 0;
+  // Stable sort: weight desc, then size desc. V8 sort is stable.
+  copy.sort((a, b) => {
+    // Higher weight prunes first.
+    const byWeight = weight(b.kind) - weight(a.kind);
+    if (byWeight !== 0) return byWeight;
+    // Larger payload prunes first within same kind.
+    return b.sizeTokens - a.sizeTokens;
+  });
+  return copy;
 }

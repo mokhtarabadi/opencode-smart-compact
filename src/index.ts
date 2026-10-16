@@ -10,12 +10,12 @@
  * pruned to a notice while the original is cached and retrievable.
  */
 import { Plugin } from "@opencode/plugin";
-import { compactNow, parseCompactArgs, scheduleTrim } from "./actions.js";
+import { compactNow, formatBudgetMeter, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
 import { applyOmissions, measureTokens, pruneToolResults, serializeResult } from "./prune.js";
 import { applyStrategies } from "./strategies.js";
-import { isOverEmergencyBudget, loadConfig, type SmartCompactConfig } from "./config.js";
-import { loadState, saveState, type Ctx } from "./store.js";
+import { getBudgetState, isOverEmergencyBudget, loadConfig, type SmartCompactConfig } from "./config.js";
+import { loadState, saveState, writeBackupPointer, type Ctx } from "./store.js";
 import { isTokenizerAvailable } from "./tokens.js";
 import type { Msg, SessionState } from "./types.js";
 
@@ -57,6 +57,11 @@ async function runPrune(
   // prune pass here would remove the only size relief a large session has, so an
   // over-budget context still gets pruned and still gets its warning.
   const measured = measureVisibleCost(messages, config);
+  // D1 meter: display-only budget ratio before prune, never changes behavior.
+  // Guard legacy or partial config/state — fail closed to empty, never throw.
+  const budgetLimit = config?.tokens?.emergencyBudgetTokens ?? 0;
+  const beforeMeter = getBudgetState(measured, budgetLimit);
+  console.log(`[smart-compact] ${formatBudgetMeter(beforeMeter)} before prune.`);
   if (isOverEmergencyBudget(measured, config)) {
     const text =
       `[smart-compact] context is over the emergency budget of ` +
@@ -67,6 +72,24 @@ async function runPrune(
   }
   const strategies = applyStrategies(messages, config);
   const pruned = pruneToolResults(messages, state, config);
+  // D1 meter: display-only ratio after prune for observable headroom.
+  const afterCost = measureVisibleCost(messages, config);
+  const afterMeter = getBudgetState(afterCost, config?.tokens?.emergencyBudgetTokens ?? 0);
+  console.log(`[smart-compact] ${formatBudgetMeter(afterMeter)} after prune.`);
+  // D3 pointer (post-prune restore source): fresh keys plus after-prune ratio.
+  // Best-effort with warn — a pointer failure never blocks prune (V5).
+  try {
+    await writeBackupPointer(
+      ctx,
+      sessionID,
+      Object.keys(state.omissions ?? {}),
+      Object.keys(state.summaries ?? {}),
+      afterMeter.ratio,
+    );
+  } catch (error) {
+    // Visible failure, still continue — pointer is restore aid, not gate.
+    console.warn(`[smart-compact] backup pointer write failed for ${sessionID}: ${(error as Error)?.message ?? error}`);
+  }
   state.stats.prunedParts += pruned.pruned + strategies.pruned;
   state.stats.prunedTokens += pruned.tokens + strategies.tokens;
   state.stats.savedTokens += pruned.memoTokens;
