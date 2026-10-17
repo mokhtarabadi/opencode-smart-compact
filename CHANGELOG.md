@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Agent guide `docs/AGENT-TOOLS.md`: copy-paste English doc for OpenCode agents covering capabilities plus `compact_context` and `read_omitted_content` call schemas.
+- Living folder docs `src/README.md` plus `src/DECISIONS.md`: module map plus D1-D5 architectural decisions.
 - O1 hybrid budget meter (D1): pure `getBudgetState` plus `BUDGET_WARN_RATIO 0.7` and `BUDGET_EMERGENCY_RATIO 0.9` in `src/config.ts`, `formatBudgetMeter` in `src/actions.ts`, display-only before/after prune logs in `src/index.ts runPrune`. Warn-only, never changes prune behavior.
 - O1 fixed cost prune order (D2): `PRUNE_WEIGHTS` plus `rankPruneCandidates` in `src/prune.ts`, two-pass `pruneToolResults` collects eligible then prunes in ranked order. Tool results first, summaries second, omissions third. User turns never prune.
 - O1 backup pointer (D3): `BackupPointer` plus `writeBackupPointer` and `readLatestBackupPointer` capped to 20 latest in `src/store.ts`, `formatBackupPointer` in `src/actions.ts`, best-effort write in `runPrune`. Per-session storage only, Date.now stats-only UTC.
