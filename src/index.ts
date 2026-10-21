@@ -12,6 +12,14 @@
 import { Plugin } from "@opencode/plugin";
 import { compactNow, formatBudgetMeter, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
+import {
+  buildAwarenessMessage,
+  getAwarenessLevel,
+  measureVisibleTokens,
+  resolveContextLimit,
+  shouldFireAwareness,
+  type AwarenessModel,
+} from "./awareness.js";
 import { applyOmissions, measureTokens, pruneToolResults, serializeResult } from "./prune.js";
 import { applyStrategies } from "./strategies.js";
 import { getBudgetState, isOverEmergencyBudget, loadConfig, type SmartCompactConfig } from "./config.js";
@@ -116,6 +124,84 @@ function measureVisibleCost(messages: Msg[], config: SmartCompactConfig): number
     }
   }
   return total;
+}
+
+/**
+ * Context-pressure awareness: tell the agent how full the context window is
+ * once it crosses the configured ratio, and how to reclaim room.
+ *
+ * Advisory only. The reminder rides on the outgoing model call as one system
+ * part, so the agent sees it without the transcript growing and without a new
+ * turn. It never compacts, never prompts, never aborts a step, and never
+ * mutates the messages. Any failure is swallowed: a warning must never break
+ * the model call.
+ */
+async function runAwareness(
+  ctx: Ctx,
+  sessionID: string,
+  event: unknown,
+  messages: Msg[],
+  config: SmartCompactConfig,
+): Promise<void> {
+  try {
+    const awareness = config.awareness;
+    if (!awareness || !awareness.enabled) return;
+    const system = (event as { system?: unknown }).system;
+    if (!Array.isArray(system)) return;
+    const modelRef = (event as { model?: unknown }).model as
+      | { providerID: string; id: string }
+      | undefined;
+    if (!modelRef) return;
+    const payload = (await ctx.model.list()) as unknown;
+    const models: ReadonlyArray<AwarenessModel> = Array.isArray(payload)
+      ? (payload as ReadonlyArray<AwarenessModel>)
+      : ((payload as { data?: ReadonlyArray<AwarenessModel> })?.data ?? []);
+    const limitTokens = resolveContextLimit(modelRef, models);
+    // An unknown model or a missing limit means no usable window size: stay
+    // silent instead of guessing a denominator.
+    if (!limitTokens) return;
+    const usedTokens = measureVisibleTokens(messages);
+    const ratio = usedTokens / limitTokens;
+    const state = await loadState(ctx, sessionID);
+    // Hysteresis: the latch is cleared only once the context has fallen
+    // meaningfully below the warn threshold. Clearing it on every small dip
+    // under the threshold would let a session hovering at the boundary re-fire
+    // the reminder on alternating requests.
+    if (ratio < awareness.warnRatio - awareness.rearmStep) {
+      if (state.awarenessLastRatio !== undefined || state.awarenessLastLevel !== undefined) {
+        state.awarenessLastRatio = undefined;
+        state.awarenessLastLevel = undefined;
+        await saveState(ctx, sessionID, state);
+      }
+      return;
+    }
+    // Between the clear line and the warn line: keep the latch, stay quiet.
+    if (ratio < awareness.warnRatio) return;
+    const level = getAwarenessLevel(ratio, awareness);
+    if (level === "none") return;
+    if (
+      !shouldFireAwareness(
+        ratio,
+        level,
+        { lastRatio: state.awarenessLastRatio, lastLevel: state.awarenessLastLevel },
+        awareness.rearmStep,
+      )
+    ) {
+      return;
+    }
+    const text = buildAwarenessMessage({
+      usedTokens,
+      limitTokens,
+      ratioPct: Math.round(ratio * 100),
+      level,
+    });
+    (system as Array<{ type: string; text: string }>).push({ type: "text", text });
+    state.awarenessLastRatio = ratio;
+    state.awarenessLastLevel = level;
+    await saveState(ctx, sessionID, state);
+  } catch {
+    // Advisory only: a failure here must never break the model call.
+  }
 }
 
 export default Plugin.define({
@@ -251,6 +337,8 @@ export default Plugin.define({
       const fresh = await loadState(ctx, sessionID);
       applySummaries(messages, fresh);
       applyOmissions(messages, fresh, config);
+      // Awareness runs last so it measures exactly what the model receives.
+      await runAwareness(ctx, sessionID, event, messages, config);
     });
   },
 });

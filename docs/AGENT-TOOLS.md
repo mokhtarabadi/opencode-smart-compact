@@ -89,3 +89,22 @@ IF context heavy AND reasoning stale -> compact_context({"mode":"compact"})
 ELSE IF only tool I/O bulky -> compact_context({"mode":"trim"})
 ELSE IF see omitted-XXXX AND need original AND cannot re-run cheaply -> read_omitted_content({"contentId":"omitted-XXXX"})
 ELSE -> do nothing.
+
+## 5. The context-pressure reminder
+
+When the session's context crosses a configured fraction of the model's context window, the plugin pushes one advisory note onto the next model call. It looks like this:
+
+```
+[smart-compact] CONTEXT PRESSURE - 72% of the context window is in use (about 104000 of 145000 measured tokens).
+```
+
+What it means and what to do:
+
+- The percentage is the live fill of the context window, measured from the model-visible messages. It is a lower bound: provider system prompts and tool schemas are invisible to the plugin, so the real usage is higher.
+- Act on it yourself. Search your tool list for `compact_context` and call it. Never ask the Manager to run `/magic-compact` — that command is the Manager-only manual equivalent.
+- Re-orient before compacting: read `AGENTS.md` and the active task file, so the summary keeps the thread of what was asked.
+- If the work in flight is not a critical, hard-to-reverse step, compact now. Sessions and turns must not silently overflow.
+- It is advisory. If you are mid-critical-step, finish the step, then compact right after. Never abort a half-written edit, a running tool call, or a commit sequence to compact.
+- Your user messages are never summarized, and pruned tool output stays retrievable via `read_omitted_content` by Content ID.
+
+It fires once per crossing, not on every request, and re-arms only after the fill grows by a further step. Configure it under `awareness` in the config file (`enabled`, `warnRatio`, `emergencyRatio`, `rearmStep`); set `enabled: false` to silence it.

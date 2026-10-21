@@ -78,6 +78,13 @@ export interface SessionState {
   pruneMemo: Record<string, MemoEntry>;
   /** A pending command request, consumed by the next context hook. */
   pending?: { mode: "compact" | "trim"; keepTurns: number } | null;
+  /**
+   * Context fill ratio recorded at the last awareness reminder. Absent means
+   * the session has not been warned yet.
+   */
+  awarenessLastRatio?: number;
+  /** Pressure level recorded at the last awareness reminder. */
+  awarenessLastLevel?: "warn" | "emergency";
 }
 
 export function emptyState(): SessionState {

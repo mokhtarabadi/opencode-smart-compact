@@ -50,6 +50,16 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
     nextOmissionId,
     pruneMemo: value.pruneMemo ?? {},
     pending: value.pending ?? null,
+    // The awareness latch survives a restart: without it a restarted session
+    // would re-warn on the very first request.
+    awarenessLastRatio:
+      typeof value.awarenessLastRatio === "number" && Number.isFinite(value.awarenessLastRatio)
+        ? value.awarenessLastRatio
+        : undefined,
+    awarenessLastLevel:
+      value.awarenessLastLevel === "warn" || value.awarenessLastLevel === "emergency"
+        ? value.awarenessLastLevel
+        : undefined,
   };
 }
 

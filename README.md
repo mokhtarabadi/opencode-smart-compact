@@ -119,15 +119,23 @@ Defaults are applied automatically; only override what you need.
     "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] },
     "stripReasoning": { "enabled": true, "thresholdChars": 500 }
   },
-  "tokens": { "enabled": false, "emergencyBudgetTokens": 50000 }
+  "tokens": { "enabled": false, "emergencyBudgetTokens": 50000 },
+  "awareness": {
+    "enabled": true,
+    "warnRatio": 0.7,
+    "emergencyRatio": 0.9,
+    "rearmStep": 0.05
+  }
 }
 ```
 
 `tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables) the run warns and still compacts: the budget is an early signal that a session is getting large, never a gate, because refusing to compact an over-budget session would deadlock it. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
 
+`awareness` is the context-pressure reminder. When the model-visible context of a session crosses `warnRatio` of the model's context window, the agent gets one advisory note on the next model call stating the current fill percentage and the token numbers behind it, naming the `compact_context` tool to call, and telling it to re-orient on the project before compacting. It is advisory only: the plugin never compacts on its own, never aborts a step, and never mutates stored history. It fires once per crossing, and re-arms only after the fill grows by `rearmStep`. The measured percentage is a lower bound, because provider system prompts and tool schemas are invisible to the plugin. Set `awareness.enabled` to `false` to silence it.
+
 ## Comparison
 
-Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and does not inject recurring prompts into every turn. The trade-off is that compaction is user-driven rather than automatic.
+Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and never compresses on its own without being asked. The trade-off is that compaction is agent-driven rather than automatic — the context-pressure reminder only tells the agent how full the window is and what to call; the agent (or you) still decides when to compact.
 
 ## Development
 
@@ -138,7 +146,7 @@ npm test            # compiles src + tests, runs node --test
 npm run verify:package   # validates the npm payload
 ```
 
-Source layout: `src/index.ts` (plugin entry), `plan.ts` (turn planning), `summarize.ts` (per-turn summaries), `apply.ts` (summary application), `prune.ts` (tool-result pruning), `strategies.ts` (deduplication, purge-errors), `config.ts`, `store.ts` (per-session state).
+Source layout: `src/index.ts` (plugin entry), `plan.ts` (turn planning), `summarize.ts` (per-turn summaries), `apply.ts` (summary application), `prune.ts` (tool-result pruning), `strategies.ts` (deduplication, purge-errors), `awareness.ts` (context-pressure reminder), `config.ts`, `store.ts` (per-session state).
 
 ## Releasing
 

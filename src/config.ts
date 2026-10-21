@@ -38,11 +38,29 @@ export interface TokensConfig {
   emergencyBudgetTokens: number;
 }
 
+/**
+ * Context-pressure awareness: when the model-visible context crosses a
+ * fraction of the model's context window, the agent is told how full the
+ * window is and what to do about it. Advisory only - the plugin never
+ * compacts on its own and never aborts a step.
+ */
+export interface AwarenessConfig {
+  /** Master switch for the context-pressure reminder. */
+  enabled: boolean;
+  /** Fill ratio of the context window that raises the first reminder. */
+  warnRatio: number;
+  /** Fill ratio that raises the escalated reminder. */
+  emergencyRatio: number;
+  /** How much the fill must grow before the reminder re-arms. */
+  rearmStep: number;
+}
+
 export interface SmartCompactConfig {
   enabled: boolean;
   pruning: PruningConfig;
   strategies: StrategiesConfig;
   tokens: TokensConfig;
+  awareness: AwarenessConfig;
 }
 
 export const DEFAULT_CONFIG: SmartCompactConfig = {
@@ -68,6 +86,7 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     stripReasoning: { enabled: true, thresholdChars: 500 },
   },
   tokens: { enabled: false, emergencyBudgetTokens: 50000 },
+  awareness: { enabled: true, warnRatio: 0.7, emergencyRatio: 0.9, rearmStep: 0.05 },
 };
 
 /** Strip JSONC comments and trailing commas. Best-effort; never throws. */
@@ -109,6 +128,38 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** A fill ratio must be a finite number strictly inside (0, 1). */
+function isValidRatio(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1;
+}
+
+/** A re-arm step must be a finite number strictly inside (0, 0.5). */
+function isValidRearmStep(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 0.5;
+}
+
+/**
+ * Merge the awareness section. Every key is validated on its own, and the
+ * pair is checked together: an inverted warn/emergency pair would make the
+ * escalation unreachable, so both fall back to the base values together.
+ * Sibling keys survive a partial update.
+ */
+function mergeAwareness(base: AwarenessConfig, patch: unknown): AwarenessConfig {
+  const record = asRecord(patch);
+  if (!record) return base;
+  const enabled = typeof record.enabled === "boolean" ? record.enabled : base.enabled;
+  const warnRatio = isValidRatio(record.warnRatio) ? record.warnRatio : base.warnRatio;
+  const emergencyRatio = isValidRatio(record.emergencyRatio)
+    ? record.emergencyRatio
+    : base.emergencyRatio;
+  const rearmStep = isValidRearmStep(record.rearmStep) ? record.rearmStep : base.rearmStep;
+  // Ordering guard: the warn threshold must stay below the emergency one.
+  if (warnRatio >= emergencyRatio) {
+    return { enabled, warnRatio: base.warnRatio, emergencyRatio: base.emergencyRatio, rearmStep };
+  }
+  return { enabled, warnRatio, emergencyRatio, rearmStep };
 }
 
 function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConfig {
@@ -171,12 +222,13 @@ function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConf
           ? tokens.emergencyBudgetTokens
           : base.tokens.emergencyBudgetTokens,
     },
+    awareness: mergeAwareness(base.awareness, p.awareness),
   };
 }
 
 /** Every known config key by section, used to warn on typos. */
 const KNOWN_KEYS: Record<string, readonly string[]> = {
-  "": ["enabled", "pruning", "strategies", "tokens"],
+  "": ["enabled", "pruning", "strategies", "tokens", "awareness"],
   pruning: [
     "maxChars",
     "maxWords",
@@ -194,6 +246,7 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   "strategies.purgeErrors": ["enabled", "turns", "protectedTools"],
   "strategies.stripReasoning": ["enabled", "thresholdChars"],
   tokens: ["enabled", "emergencyBudgetTokens"],
+  awareness: ["enabled", "warnRatio", "emergencyRatio", "rearmStep"],
 };
 
 /** Collect one warning per unknown key, naming its exact dotted path. */
@@ -229,6 +282,46 @@ export function validateConfig(raw: unknown): string[] {
   }
   const tokens = asRecord(root.tokens);
   if (tokens) collectUnknown(tokens, "tokens", warnings);
+  const awareness = asRecord(root.awareness);
+  if (awareness) {
+    collectUnknown(awareness, "awareness", warnings);
+    warnings.push(...validateAwareness(awareness));
+  }
+  return warnings;
+}
+
+/**
+ * Range checks for the awareness section. Returns one warning per invalid
+ * value, naming the exact key path. The merge layer drops invalid values
+ * back to the defaults, so a bad threshold can never break the hook.
+ */
+export function validateAwareness(raw: unknown): string[] {
+  const warnings: string[] = [];
+  const record = asRecord(raw);
+  if (!record) return warnings;
+  const warnRatio = record.warnRatio;
+  const emergencyRatio = record.emergencyRatio;
+  const rearmStep = record.rearmStep;
+  if (warnRatio !== undefined && !isValidRatio(warnRatio)) {
+    warnings.push(
+      "Invalid config value: awareness.warnRatio must be a number greater than 0 and less than 1",
+    );
+  }
+  if (emergencyRatio !== undefined && !isValidRatio(emergencyRatio)) {
+    warnings.push(
+      "Invalid config value: awareness.emergencyRatio must be a number greater than 0 and less than 1",
+    );
+  }
+  if (rearmStep !== undefined && !isValidRearmStep(rearmStep)) {
+    warnings.push(
+      "Invalid config value: awareness.rearmStep must be a number greater than 0 and less than 0.5",
+    );
+  }
+  if (isValidRatio(warnRatio) && isValidRatio(emergencyRatio) && warnRatio >= emergencyRatio) {
+    warnings.push(
+      "Invalid config value: awareness.warnRatio must be less than awareness.emergencyRatio",
+    );
+  }
   return warnings;
 }
 

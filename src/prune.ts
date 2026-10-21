@@ -45,11 +45,18 @@ export function shouldPrune(
   return exceeds(text, config.pruning.maxWords, config.pruning.maxChars);
 }
 
-/** Serialize a tool-result value to text for caching and token estimation. */
+/**
+ * Serialize a tool-result value to text for caching and token estimation.
+ * Always returns a string: `JSON.stringify` yields `undefined` for undefined
+ * values, functions, and symbols, and a result that claims to be a string but
+ * is not would break every `.length` and `.slice` on it downstream.
+ */
 export function serializeResult(value: unknown): string {
   if (typeof value === "string") return value;
+  if (value === undefined) return "";
   try {
-    return JSON.stringify(value);
+    const encoded = JSON.stringify(value);
+    return typeof encoded === "string" ? encoded : "";
   } catch {
     return String(value);
   }

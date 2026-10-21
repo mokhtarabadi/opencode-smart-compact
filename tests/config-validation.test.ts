@@ -56,6 +56,64 @@ test("loadConfig merges project config and warns on unknown keys", async () => {
   }
 });
 
+test("awareness defaults are on with the approved thresholds", () => {
+  assert.deepEqual(DEFAULT_CONFIG.awareness, {
+    enabled: true,
+    warnRatio: 0.7,
+    emergencyRatio: 0.9,
+    rearmStep: 0.05,
+  });
+  assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
+});
+
+test("validateConfig names unknown awareness keys and rejects out-of-range values", () => {
+  const unknown = validateConfig({ awareness: { nope: 1 } });
+  assert.ok(unknown.some((w) => w.includes("awareness.nope")));
+  const badRatio = validateConfig({ awareness: { warnRatio: 1.5 } });
+  assert.ok(badRatio.some((w) => w.includes("awareness.warnRatio")));
+  const badStep = validateConfig({ awareness: { rearmStep: 0 } });
+  assert.ok(badStep.some((w) => w.includes("awareness.rearmStep")));
+  const inverted = validateConfig({ awareness: { warnRatio: 0.95, emergencyRatio: 0.9 } });
+  assert.ok(inverted.some((w) => w.includes("awareness.warnRatio")));
+});
+
+test("loadConfig overrides one awareness key and keeps its siblings", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-awareness-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"warnRatio": 0.5}}');
+  const { loadConfig } = await import("../src/config.js");
+  const config = await loadConfig({ location: { directory: dir } } as never);
+  assert.equal(config.awareness.warnRatio, 0.5);
+  assert.equal(config.awareness.emergencyRatio, 0.9);
+  assert.equal(config.awareness.rearmStep, 0.05);
+  assert.equal(config.awareness.enabled, true);
+});
+
+test("loadConfig drops invalid awareness values back to the defaults", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-awareness-bad-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(dir, ".opencode", "smart-compact.jsonc"),
+    '{"awareness": {"warnRatio": 2, "rearmStep": 9}}',
+  );
+  const original = console.warn;
+  console.warn = () => {};
+  try {
+    const { loadConfig } = await import("../src/config.js");
+    const config = await loadConfig({ location: { directory: dir } } as never);
+    assert.equal(config.awareness.warnRatio, 0.7);
+    assert.equal(config.awareness.rearmStep, 0.05);
+  } finally {
+    console.warn = original;
+  }
+});
+
 test("budget guard is advisory: no caller early-returns on an over-budget history", async () => {
   // Regression guard for the deadlock: the budget check must never be followed
   // by a bare early return, or the largest sessions silently lose all
