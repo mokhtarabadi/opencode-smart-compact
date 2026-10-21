@@ -94,9 +94,10 @@ Smart Compact reads JSONC, with project settings overriding global settings:
 1. Global: `~/.config/opencode/smart-compact.jsonc`
 2. Project: `.opencode/smart-compact.jsonc`
 
-Defaults are applied automatically; only override what you need.
+Copy this recommended file to `~/.config/opencode/smart-compact.jsonc` for the best global setup. The project file overrides it; defaults apply for missing keys. If the global file is missing, create it with this exact content.
 
 ```jsonc
+// Recommended global config. Create it on install if missing.
 {
   "enabled": true,
   "pruning": {
@@ -112,14 +113,14 @@ Defaults are applied automatically; only override what you need.
     },
     "preserveRecentTurns": 2,
     "truncateToolsChars": 1024,
-    "useTokens": false
+    "useTokens": true
   },
   "strategies": {
     "deduplication": { "enabled": true, "protectedTools": ["question"] },
     "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] },
     "stripReasoning": { "enabled": true, "thresholdChars": 500 }
   },
-  "tokens": { "enabled": false, "emergencyBudgetTokens": 50000 },
+  "tokens": { "enabled": true, "emergencyBudgetTokens": 50000 },
   "awareness": {
     "enabled": true,
     "warnRatio": 0.7,
