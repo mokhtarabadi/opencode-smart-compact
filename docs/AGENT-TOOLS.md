@@ -100,7 +100,7 @@ Returns: cached original text, possibly stale. If missing: `"No omitted content 
     "stripReasoning": { "enabled": true, "thresholdChars": 500 }
   },
   "tokens": { "enabled": true, "emergencyBudgetTokens": 50000 },
-  "awareness": { "enabled": true, "warnRatio": 0.7, "emergencyRatio": 0.9, "rearmStep": 0.05 }
+  "awareness": { "enabled": true, "warnRatio": 0.7, "emergencyRatio": 0.9, "rearmStep": 0.05, "autoTrimRatio": 0 }
 }
 ```
 5. Human tools are out of scope. Only the two tools above are agent-callable. Ignore file-system, shell, or Manager UI tools.
@@ -130,3 +130,5 @@ What it means and what to do:
 - Your user messages are never summarized, and pruned tool output stays retrievable via `read_omitted_content` by Content ID.
 
 It fires once per crossing, not on every request, and re-arms only after the fill grows by a further step. Configure it under `awareness` in the config file (`enabled`, `warnRatio`, `emergencyRatio`, `rearmStep`); set `enabled: false` to silence it.
+
+`awareness.autoTrimRatio` is the only automatic action: at or above that fill the plugin queues a tool-output-only trim for the next request by itself. It never summarizes a turn and never touches a user message, so nothing you need to reason about is lost, and every pruned original stays available through `read_omitted_content`. `0` disables it.

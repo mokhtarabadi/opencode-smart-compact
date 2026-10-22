@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import plugin from "../src/index.js";
 import type { Msg } from "../src/types.js";
+
+// The hook resolves the global config from XDG_CONFIG_HOME: point it at an
+// empty directory so the developer's real global file cannot change results.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "smart-compact-xdg-"));
 
 /**
  * One assistant turn of `chars` characters. The plugin estimates about four
@@ -198,6 +205,39 @@ test("the kill switch silences the reminder entirely", async () => {
     messages: [bigMessage(32000)],
   });
   assert.equal(system.length, 0);
+});
+
+test("autoTrimRatio queues a lossless trim below the advisory threshold", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-autotrim-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"autoTrimRatio": 0.4}}');
+  const h = await harness({ limitContext: 10_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const base = { sessionID: "ses-auto", model: { providerID: "test", id: "model-x" }, system };
+  // 25 percent: below the auto-trim line, nothing is queued.
+  await h.hook({ ...base, messages: [bigMessage(10000)] });
+  assert.equal((h.storage.get("session:ses-auto") as { pending?: unknown } | undefined)?.pending ?? null, null);
+  // 50 percent: above the line but below warnRatio, so a trim is queued silently.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  const state = h.storage.get("session:ses-auto") as { pending?: unknown };
+  assert.deepEqual(state.pending, { mode: "trim", keepTurns: 0 });
+  // Trimming is lossless, so no advisory is posted at this fill.
+  assert.equal(system.length, 0);
+});
+
+test("autoTrimRatio stays off by default", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  await h.hook({
+    sessionID: "ses-default",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [bigMessage(20000)],
+  });
+  assert.equal((h.storage.get("session:ses-default") as { pending?: unknown } | undefined)?.pending ?? null, null);
 });
 
 test("a session hovering at the threshold does not re-fire on every request", async () => {

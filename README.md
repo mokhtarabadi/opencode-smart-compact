@@ -125,18 +125,21 @@ Copy this recommended file to `~/.config/opencode/smart-compact.jsonc` for the b
     "enabled": true,
     "warnRatio": 0.7,
     "emergencyRatio": 0.9,
-    "rearmStep": 0.05
+    "rearmStep": 0.05,
+    "autoTrimRatio": 0
   }
 }
 ```
 
 `tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables) the run warns and still compacts: the budget is an early signal that a session is getting large, never a gate, because refusing to compact an over-budget session would deadlock it. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
 
-`awareness` is the context-pressure reminder. When the model-visible context of a session crosses `warnRatio` of the model's context window, the agent gets one advisory note on the next model call stating the current fill percentage and the token numbers behind it, naming the `compact_context` tool to call, and telling it to re-orient on the project before compacting. It is advisory only: the plugin never compacts on its own, never aborts a step, and never mutates stored history. It fires once per crossing, and re-arms only after the fill grows by `rearmStep`. The measured percentage is a lower bound, because provider system prompts and tool schemas are invisible to the plugin. Set `awareness.enabled` to `false` to silence it.
+`awareness` is the context-pressure reminder. When the model-visible context of a session crosses `warnRatio` of the model's context window, the agent gets one advisory note on the next model call stating the current fill percentage and the token numbers behind it, naming the `compact_context` tool to call, and telling it to re-orient on the project before compacting. It is advisory only: the plugin never summarizes on its own, never aborts a step, and never mutates stored history. It fires once per crossing, and re-arms only after the fill grows by `rearmStep`. The measured percentage is a lower bound, because provider system prompts and tool schemas are invisible to the plugin. Set `awareness.enabled` to `false` to silence it.
+
+`awareness.autoTrimRatio` is the one automatic action, and it is lossless: at or above that fill the plugin queues a tool-output-only trim for the next request, so bulky completed tool results become notices while their originals stay cached under a Content ID. No turn is summarized, no user message is touched, and a compaction already queued is never overwritten. `0` (the default) disables it; a 1M-token window rarely needs it before the advisory fires, while a 200K window benefits from setting it near `warnRatio`.
 
 ## Comparison
 
-Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and never compresses on its own without being asked. The trade-off is that compaction is agent-driven rather than automatic — the context-pressure reminder only tells the agent how full the window is and what to call; the agent (or you) still decides when to compact.
+Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and never summarizes a turn without being asked. The trade-off is that compaction is agent-driven rather than automatic — the context-pressure reminder only tells the agent how full the window is and what to call; the agent (or you) still decides when to summarize. Tool-output trimming is the exception: with `awareness.autoTrimRatio` set it runs on its own at that fill, and it is lossless because every pruned original stays cached.
 
 ## Development
 

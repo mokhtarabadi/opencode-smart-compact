@@ -17,6 +17,7 @@ import {
   getAwarenessLevel,
   measureVisibleTokens,
   resolveContextLimit,
+  shouldAutoTrim,
   shouldFireAwareness,
   type AwarenessModel,
 } from "./awareness.js";
@@ -163,6 +164,17 @@ async function runAwareness(
     const usedTokens = measureVisibleTokens(messages);
     const ratio = usedTokens / limitTokens;
     const state = await loadState(ctx, sessionID);
+    // Lossless relief below the advisory threshold: schedule the tool-output
+    // prune pass for the next request. Nothing is summarized and no user
+    // message is touched, so this is safe to do without asking the agent.
+    if (shouldAutoTrim(ratio, awareness.autoTrimRatio, state.pending !== null)) {
+      state.pending = { mode: "trim", keepTurns: 0 };
+      await saveState(ctx, sessionID, state);
+      console.log(
+        `[smart-compact] ${Math.round(ratio * 100)}% of the window is in use; ` +
+          `tool output will be trimmed on the next request.`,
+      );
+    }
     // Hysteresis: the latch is cleared only once the context has fallen
     // meaningfully below the warn threshold. Clearing it on every small dip
     // under the threshold would let a session hovering at the boundary re-fire

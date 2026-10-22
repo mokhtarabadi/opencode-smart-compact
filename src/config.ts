@@ -53,6 +53,12 @@ export interface AwarenessConfig {
   emergencyRatio: number;
   /** How much the fill must grow before the reminder re-arms. */
   rearmStep: number;
+  /**
+   * Fill ratio that schedules a lossless tool-output trim for the next request.
+   * 0 disables it. Trimming never summarizes a turn, so the only thing it can
+   * cost is a cache round-trip through `read_omitted_content`.
+   */
+  autoTrimRatio: number;
 }
 
 export interface SmartCompactConfig {
@@ -86,7 +92,7 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     stripReasoning: { enabled: true, thresholdChars: 500 },
   },
   tokens: { enabled: false, emergencyBudgetTokens: 50000 },
-  awareness: { enabled: true, warnRatio: 0.7, emergencyRatio: 0.9, rearmStep: 0.05 },
+  awareness: { enabled: true, warnRatio: 0.7, emergencyRatio: 0.9, rearmStep: 0.05, autoTrimRatio: 0 },
 };
 
 /** Strip JSONC comments and trailing commas. Best-effort; never throws. */
@@ -155,11 +161,24 @@ function mergeAwareness(base: AwarenessConfig, patch: unknown): AwarenessConfig 
     ? record.emergencyRatio
     : base.emergencyRatio;
   const rearmStep = isValidRearmStep(record.rearmStep) ? record.rearmStep : base.rearmStep;
+  // 0 is a valid value here: it means "never auto-trim", the shipped default.
+  const autoTrimRatio =
+    record.autoTrimRatio === 0
+      ? 0
+      : isValidRatio(record.autoTrimRatio)
+        ? record.autoTrimRatio
+        : base.autoTrimRatio;
   // Ordering guard: the warn threshold must stay below the emergency one.
   if (warnRatio >= emergencyRatio) {
-    return { enabled, warnRatio: base.warnRatio, emergencyRatio: base.emergencyRatio, rearmStep };
+    return {
+      enabled,
+      warnRatio: base.warnRatio,
+      emergencyRatio: base.emergencyRatio,
+      rearmStep,
+      autoTrimRatio,
+    };
   }
-  return { enabled, warnRatio, emergencyRatio, rearmStep };
+  return { enabled, warnRatio, emergencyRatio, rearmStep, autoTrimRatio };
 }
 
 function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConfig {
@@ -246,7 +265,7 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   "strategies.purgeErrors": ["enabled", "turns", "protectedTools"],
   "strategies.stripReasoning": ["enabled", "thresholdChars"],
   tokens: ["enabled", "emergencyBudgetTokens"],
-  awareness: ["enabled", "warnRatio", "emergencyRatio", "rearmStep"],
+  awareness: ["enabled", "warnRatio", "emergencyRatio", "rearmStep", "autoTrimRatio"],
 };
 
 /** Collect one warning per unknown key, naming its exact dotted path. */
@@ -315,6 +334,12 @@ export function validateAwareness(raw: unknown): string[] {
   if (rearmStep !== undefined && !isValidRearmStep(rearmStep)) {
     warnings.push(
       "Invalid config value: awareness.rearmStep must be a number greater than 0 and less than 0.5",
+    );
+  }
+  const autoTrimRatio = record.autoTrimRatio;
+  if (autoTrimRatio !== undefined && autoTrimRatio !== 0 && !isValidRatio(autoTrimRatio)) {
+    warnings.push(
+      "Invalid config value: awareness.autoTrimRatio must be 0 or a number greater than 0 and less than 1",
     );
   }
   if (isValidRatio(warnRatio) && isValidRatio(emergencyRatio) && warnRatio >= emergencyRatio) {

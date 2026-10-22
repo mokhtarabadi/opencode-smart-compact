@@ -5,6 +5,7 @@ import {
   getAwarenessLevel,
   measureVisibleTokens,
   resolveContextLimit,
+  shouldAutoTrim,
   shouldFireAwareness,
 } from "../src/awareness.js";
 import type { Msg } from "../src/types.js";
@@ -127,4 +128,17 @@ test("buildAwarenessMessage escalates the wording at the emergency level", () =>
   });
   assert.match(text, /95%/);
   assert.match(text, /emergency context pressure/);
+});
+
+test("shouldAutoTrim schedules a trim only above its own ratio and never over a pending run", () => {
+  assert.equal(shouldAutoTrim(0.4, 0.5, false), false);
+  assert.equal(shouldAutoTrim(0.5, 0.5, false), true);
+  assert.equal(shouldAutoTrim(0.9, 0.5, false), true);
+  // 0 is the shipped default: auto-trim off.
+  assert.equal(shouldAutoTrim(0.99, 0, false), false);
+  // A compaction already queued for the next request wins over a weaker trim.
+  assert.equal(shouldAutoTrim(0.99, 0.5, true), false);
+  // Malformed input never schedules anything.
+  assert.equal(shouldAutoTrim(Number.NaN, 0.5, false), false);
+  assert.equal(shouldAutoTrim(0.99, Number.NaN, false), false);
 });

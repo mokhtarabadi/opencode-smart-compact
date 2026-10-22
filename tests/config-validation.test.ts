@@ -1,10 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   isOverEmergencyBudget,
   DEFAULT_CONFIG,
   validateConfig,
 } from "../src/config.js";
+
+// Isolate the suite from the developer's real global config, so a machine that
+// configures `~/.config/opencode/smart-compact.jsonc` cannot change the
+// assertions below.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "smart-compact-xdg-"));
 
 test("validateConfig accepts known keys without warnings", () => {
   assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
@@ -62,6 +70,7 @@ test("awareness defaults are on with the approved thresholds", () => {
     warnRatio: 0.7,
     emergencyRatio: 0.9,
     rearmStep: 0.05,
+    autoTrimRatio: 0,
   });
   assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
 });
@@ -75,6 +84,11 @@ test("validateConfig names unknown awareness keys and rejects out-of-range value
   assert.ok(badStep.some((w) => w.includes("awareness.rearmStep")));
   const inverted = validateConfig({ awareness: { warnRatio: 0.95, emergencyRatio: 0.9 } });
   assert.ok(inverted.some((w) => w.includes("awareness.warnRatio")));
+  // autoTrimRatio accepts 0 (off) plus the open (0, 1) range, nothing else.
+  assert.deepEqual(validateConfig({ awareness: { autoTrimRatio: 0 } }), []);
+  assert.deepEqual(validateConfig({ awareness: { autoTrimRatio: 0.5 } }), []);
+  const badAutoTrim = validateConfig({ awareness: { autoTrimRatio: 1 } });
+  assert.ok(badAutoTrim.some((w) => w.includes("awareness.autoTrimRatio")));
 });
 
 test("loadConfig overrides one awareness key and keeps its siblings", async () => {

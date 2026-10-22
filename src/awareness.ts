@@ -135,6 +135,25 @@ export function shouldFireAwareness(
 }
 
 /**
+ * Whether the pressure is high enough to schedule a lossless tool-output trim.
+ *
+ * Trimming only replaces bulky completed tool results with a notice whose
+ * original stays cached, so it is always safe to run without asking the agent:
+ * nothing is summarized, no user message is touched, and no step is aborted.
+ * A compaction already waiting to apply wins, so the pending request is never
+ * overwritten by a weaker one.
+ */
+export function shouldAutoTrim(
+  ratio: number,
+  autoTrimRatio: number,
+  hasPending: boolean,
+): boolean {
+  if (!Number.isFinite(ratio) || !Number.isFinite(autoTrimRatio) || autoTrimRatio <= 0) return false;
+  if (hasPending) return false;
+  return ratio >= autoTrimRatio;
+}
+
+/**
  * The professional reminder addressed to the agent.
  *
  * It states the current fill of the context window with the numbers behind
