@@ -85,6 +85,12 @@ export interface SessionState {
   awarenessLastRatio?: number;
   /** Pressure level recorded at the last awareness reminder. */
   awarenessLastLevel?: "warn" | "emergency";
+  /**
+   * Fill ratio recorded when the automatic trim was last queued. One sustained
+   * high-pressure period queues at most one trim; the value is cleared once the
+   * fill drops below the auto-trim line by one re-arm step.
+   */
+  autoTrimLastRatio?: number;
 }
 
 export function emptyState(): SessionState {

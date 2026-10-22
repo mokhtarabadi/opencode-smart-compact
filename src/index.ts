@@ -13,6 +13,7 @@ import { Plugin } from "@opencode/plugin";
 import { compactNow, formatBudgetMeter, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
 import {
+  autoTrimResetLine,
   buildAwarenessMessage,
   getAwarenessLevel,
   measureVisibleTokens,
@@ -167,14 +168,34 @@ async function runAwareness(
     // Lossless relief below the advisory threshold: schedule the tool-output
     // prune pass for the next request. Nothing is summarized and no user
     // message is touched, so this is safe to do without asking the agent.
-    if (shouldAutoTrim(ratio, awareness.autoTrimRatio, state.pending !== null)) {
+    // One sustained pressure period trims once: the latch clears only once the
+    // fill drops a re-arm step below the line, so a repeated request at the
+    // same fill queues nothing.
+    const autoTrimRatio = awareness.autoTrimRatio;
+    const trimResetLine = autoTrimResetLine(autoTrimRatio, awareness.rearmStep);
+    let stateChanged = false;
+    if (autoTrimRatio > 0 && ratio < trimResetLine && state.autoTrimLastRatio !== undefined) {
+      state.autoTrimLastRatio = undefined;
+      stateChanged = true;
+    }
+    if (
+      shouldAutoTrim({
+        ratio,
+        autoTrimRatio,
+        rearmStep: awareness.rearmStep,
+        hasPending: state.pending !== null,
+        lastRatio: state.autoTrimLastRatio,
+      })
+    ) {
       state.pending = { mode: "trim", keepTurns: 0 };
-      await saveState(ctx, sessionID, state);
+      state.autoTrimLastRatio = ratio;
+      stateChanged = true;
       console.log(
         `[smart-compact] ${Math.round(ratio * 100)}% of the window is in use; ` +
           `tool output will be trimmed on the next request.`,
       );
     }
+    if (stateChanged) await saveState(ctx, sessionID, state);
     // Hysteresis: the latch is cleared only once the context has fallen
     // meaningfully below the warn threshold. Clearing it on every small dip
     // under the threshold would let a session hovering at the boundary re-fire

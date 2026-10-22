@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  autoTrimResetLine,
   buildAwarenessMessage,
   getAwarenessLevel,
   measureVisibleTokens,
@@ -130,15 +131,41 @@ test("buildAwarenessMessage escalates the wording at the emergency level", () =>
   assert.match(text, /emergency context pressure/);
 });
 
-test("shouldAutoTrim schedules a trim only above its own ratio and never over a pending run", () => {
-  assert.equal(shouldAutoTrim(0.4, 0.5, false), false);
-  assert.equal(shouldAutoTrim(0.5, 0.5, false), true);
-  assert.equal(shouldAutoTrim(0.9, 0.5, false), true);
+test("shouldAutoTrim fires on the first crossing and only re-arms after a step", () => {
+  const base = { autoTrimRatio: 0.5, rearmStep: 0.05, hasPending: false };
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.4 }), false);
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.5 }), true);
   // 0 is the shipped default: auto-trim off.
-  assert.equal(shouldAutoTrim(0.99, 0, false), false);
+  assert.equal(shouldAutoTrim({ ...base, autoTrimRatio: 0, ratio: 0.99 }), false);
   // A compaction already queued for the next request wins over a weaker trim.
-  assert.equal(shouldAutoTrim(0.99, 0.5, true), false);
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.99, hasPending: true }), false);
+  // Same fill again: the latch holds, so a sustained period trims once.
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.5, lastRatio: 0.5 }), false);
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.53, lastRatio: 0.5 }), false);
+  // A further step re-arms the trim.
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.55, lastRatio: 0.5 }), true);
+  // A latched ratio at or above the current fill never fires.
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.6, lastRatio: 0.7 }), false);
   // Malformed input never schedules anything.
-  assert.equal(shouldAutoTrim(Number.NaN, 0.5, false), false);
-  assert.equal(shouldAutoTrim(0.99, Number.NaN, false), false);
+  assert.equal(shouldAutoTrim({ ...base, ratio: Number.NaN }), false);
+  assert.equal(shouldAutoTrim({ ...base, autoTrimRatio: Number.NaN, ratio: 0.99 }), false);
+  assert.equal(shouldAutoTrim({ ...base, ratio: 0.99, lastRatio: Number.NaN }), true);
+  // A zero or invalid step cannot re-arm by growth: an unchanged fill would
+  // otherwise re-queue on every request (review R1), so the latch holds.
+  assert.equal(shouldAutoTrim({ ...base, rearmStep: 0, ratio: 0.9, lastRatio: 0.9 }), false);
+  assert.equal(shouldAutoTrim({ ...base, rearmStep: Number.NaN, ratio: 0.9, lastRatio: 0.5 }), false);
+  // The initial crossing still fires, and a reset (cleared latch) still fires.
+  assert.equal(shouldAutoTrim({ ...base, rearmStep: 0, ratio: 0.9 }), true);
+  assert.equal(shouldAutoTrim({ ...base, rearmStep: 0, ratio: 0.9, lastRatio: undefined }), true);
+});
+
+test("autoTrimResetLine never lands at or below zero", () => {
+  assert.equal(autoTrimResetLine(0.5, 0.05), 0.45);
+  // A step at or above the line would subtract to zero or below and the latch
+  // could never clear, so the line itself becomes the reset point.
+  assert.equal(autoTrimResetLine(0.03, 0.05), 0.03);
+  assert.equal(autoTrimResetLine(0.05, 0.05), 0.05);
+  // Disabled or malformed input resets at zero.
+  assert.equal(autoTrimResetLine(0, 0.05), 0);
+  assert.equal(autoTrimResetLine(Number.NaN, 0.05), 0);
 });

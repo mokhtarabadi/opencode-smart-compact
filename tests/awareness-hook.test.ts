@@ -240,6 +240,72 @@ test("autoTrimRatio stays off by default", async () => {
   assert.equal((h.storage.get("session:ses-default") as { pending?: unknown } | undefined)?.pending ?? null, null);
 });
 
+test("a sustained high-pressure period queues one trim, not one per request", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-autotrim-latch-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"autoTrimRatio": 0.4}}');
+  const h = await harness({ limitContext: 10_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const base = { sessionID: "ses-latch", model: { providerID: "test", id: "model-x" }, system };
+  const pendingOf = () =>
+    (h.storage.get("session:ses-latch") as { pending?: unknown } | undefined)?.pending ?? null;
+  // First request at 50 percent queues the trim.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  assert.deepEqual(pendingOf(), { mode: "trim", keepTurns: 0 });
+  // Second request at the same fill: the queued trim is consumed, nothing is re-queued.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  assert.equal(pendingOf(), null);
+  // Third request, still the same fill: the latch holds.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  assert.equal(pendingOf(), null);
+});
+
+test("the auto-trim latch clears below its line and a new rise trims again", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-autotrim-reset-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"autoTrimRatio": 0.4}}');
+  const h = await harness({ limitContext: 10_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const base = { sessionID: "ses-reset", model: { providerID: "test", id: "model-x" }, system };
+  const stateOf = () => h.storage.get("session:ses-reset") as { pending?: unknown; autoTrimLastRatio?: number };
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  assert.deepEqual(stateOf().pending, { mode: "trim", keepTurns: 0 });
+  // Fill drops well below the line: the latch is cleared.
+  await h.hook({ ...base, messages: [bigMessage(8000)] });
+  assert.equal(stateOf().autoTrimLastRatio, undefined);
+  // A new rise past the line trims again.
+  await h.hook({ ...base, messages: [bigMessage(22000)] });
+  assert.deepEqual(stateOf().pending, { mode: "trim", keepTurns: 0 });
+});
+
+test("disabling awareness also stops the automatic trim", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-autotrim-off-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(dir, ".opencode", "smart-compact.jsonc"),
+    '{"awareness": {"enabled": false, "autoTrimRatio": 0.4}}',
+  );
+  const h = await harness({ limitContext: 10_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  await h.hook({
+    sessionID: "ses-off",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [bigMessage(20000)],
+  });
+  assert.equal((h.storage.get("session:ses-off") as { pending?: unknown } | undefined)?.pending ?? null, null);
+  assert.equal(system.length, 0);
+});
+
 test("a session hovering at the threshold does not re-fire on every request", async () => {
   const h = await harness({ limitContext: 10_000 });
   const system: Array<{ type: string; text: string }> = [];

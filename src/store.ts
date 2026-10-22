@@ -60,6 +60,12 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       value.awarenessLastLevel === "warn" || value.awarenessLastLevel === "emergency"
         ? value.awarenessLastLevel
         : undefined,
+    // The auto-trim latch survives a restart for the same reason as the
+    // advisory latch: a restarted session must not trim again immediately.
+    autoTrimLastRatio:
+      typeof value.autoTrimLastRatio === "number" && Number.isFinite(value.autoTrimLastRatio)
+        ? value.autoTrimLastRatio
+        : undefined,
   };
 }
 

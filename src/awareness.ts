@@ -142,15 +142,44 @@ export function shouldFireAwareness(
  * nothing is summarized, no user message is touched, and no step is aborted.
  * A compaction already waiting to apply wins, so the pending request is never
  * overwritten by a weaker one.
+ *
+ * One sustained high-pressure period queues at most one trim: the first
+ * crossing fires, and a later request fires again only once the fill has grown
+ * by `rearmStep` since the last queued trim. The caller clears `lastRatio` when
+ * the fill drops back below the line, so a genuine new rise trims again.
  */
-export function shouldAutoTrim(
-  ratio: number,
-  autoTrimRatio: number,
-  hasPending: boolean,
-): boolean {
+export function shouldAutoTrim(args: {
+  ratio: number;
+  autoTrimRatio: number;
+  rearmStep: number;
+  hasPending: boolean;
+  lastRatio?: number;
+}): boolean {
+  const { ratio, autoTrimRatio, rearmStep, hasPending, lastRatio } = args;
   if (!Number.isFinite(ratio) || !Number.isFinite(autoTrimRatio) || autoTrimRatio <= 0) return false;
   if (hasPending) return false;
-  return ratio >= autoTrimRatio;
+  if (ratio < autoTrimRatio) return false;
+  if (typeof lastRatio !== "number" || !Number.isFinite(lastRatio)) return true;
+  // Without a usable step there is no growth test to apply: an unchanged fill
+  // would otherwise pass `ratio >= lastRatio` and re-queue on every request,
+  // which is exactly the behaviour the latch exists to prevent. Growth-based
+  // re-arming is suppressed; the initial crossing above and the caller's reset
+  // line still work.
+  if (!Number.isFinite(rearmStep) || rearmStep <= 0) return false;
+  return ratio >= lastRatio + rearmStep;
+}
+
+/**
+ * The fill below which the auto-trim latch is cleared. Normally one re-arm step
+ * under the line, mirroring the advisory latch. When `autoTrimRatio` is itself
+ * smaller than the step, the subtraction would land at or below zero and the
+ * latch could never clear, so the line itself is used instead.
+ */
+export function autoTrimResetLine(autoTrimRatio: number, rearmStep: number): number {
+  if (!Number.isFinite(autoTrimRatio) || autoTrimRatio <= 0) return 0;
+  const step = Number.isFinite(rearmStep) && rearmStep > 0 ? rearmStep : 0;
+  if (step >= autoTrimRatio) return autoTrimRatio;
+  return autoTrimRatio - step;
 }
 
 /**
