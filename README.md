@@ -21,7 +21,7 @@ Because the transcript is never modified, a compaction can be recomputed from st
 - **Retrievable pruning** — bulky completed tool output is replaced with a notice; the original is cached and can be read back with `read_omitted_content`.
 - **Automatic strategies** — repeated identical tool calls are deduplicated (newest kept) and the arguments of stale errored tool calls are blanked.
 - **Zero ongoing prompt overhead** — compaction is command-driven, not a background loop, so cache invalidation happens once per compaction.
-- **Observable** — `/magic-stats` reports tokens pruned, turns summarized, and cached omissions.
+- **Observable** — `/magic-stats` reports tokens pruned, turns summarized, and cached omissions, and the agent-callable `compact_stats` tool reports the same figures without the Manager.
 
 ## Installation
 
@@ -50,6 +50,7 @@ or list it in `opencode.json(c)`:
 | `/magic-compact [N]` | Summarize old assistant turns, keeping the last `N` turns; prune bulky tool output. |
 | `/magic-trim [N]` | Prune bulky tool output only, without summarizing. |
 | `/magic-stats` | Report cumulative savings for the session as a visible message. |
+| `compact_stats` | Agent tool: same savings report, callable without the Manager. |
 
 Compaction is scheduled by the command and applied on the next model request.
 
@@ -65,6 +66,10 @@ Compaction is scheduled by the command and applied on the next model request.
 ### The omitted-content tool
 
 `read_omitted_content` returns the cached original for a Content ID (e.g. `omitted-0001`) that appears in a pruning notice. The lookup is scoped to the current session. Use it only when the original cannot be reproduced by a new tool call.
+
+### The stats tool
+
+`compact_stats` reports the same cumulative figures as `/magic-stats` — tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time, tokenizer state — without the Manager having to run anything. It takes no inputs, only reads storage, and shares the formatter with the slash command, so the two lanes cannot report different numbers.
 
 ## Pruning rules
 

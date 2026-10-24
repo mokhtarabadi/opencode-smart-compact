@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCompactArgs } from "../src/actions.js";
+import { parseCompactArgs, formatStats } from "../src/actions.js";
+import { emptyState } from "../src/types.js";
 
 test("parseCompactArgs defaults to compact-all", () => {
   assert.deepEqual(parseCompactArgs(undefined), { mode: "compact", keepTurns: 0 });
@@ -24,4 +25,41 @@ test("parseCompactArgs rejects a negative, fractional, or non-numeric keepTurns"
   for (const bad of [-1, 1.5, "2", Number.NaN]) {
     assert.throws(() => parseCompactArgs({ keepTurns: bad }), /non-negative integer/);
   }
+});
+
+test("formatStats renders a fresh session as all zeros", () => {
+  const text = formatStats(emptyState());
+  assert.equal(
+    text,
+    "[smart-compact] pruned ~0 tokens across 0 tool results; summarized 0 turns; " +
+      "0 cached omissions; memo-saved ~0 tokens; last run 0ms; tokenizer off.",
+  );
+});
+
+test("formatStats reports counters, cache size and tokenizer state", () => {
+  const state = emptyState();
+  state.stats = {
+    prunedTokens: 1200,
+    summarizedTurns: 4,
+    prunedParts: 9,
+    savedTokens: 300,
+    lastRun: 1792837690007,
+    lastRunMs: 12,
+    tokenizerUsed: true,
+  };
+  state.omissions = {
+    "omitted-0001": { id: "omitted-0001", callId: "c1", name: "shell", content: "x", tokens: 40 },
+  };
+  const text = formatStats(state);
+  assert.match(text, /pruned ~1200 tokens across 9 tool results/);
+  assert.match(text, /summarized 4 turns; 1 cached omissions/);
+  assert.match(text, /memo-saved ~300 tokens; last run 12ms; tokenizer on\./);
+});
+
+test("formatStats never renders NaN for malformed counters", () => {
+  const state = emptyState();
+  state.stats = { prunedTokens: Number.NaN, summarizedTurns: 2, prunedParts: 1, savedTokens: 0 };
+  const text = formatStats(state);
+  assert.match(text, /pruned ~0 tokens/);
+  assert.equal(text.includes("NaN"), false);
 });

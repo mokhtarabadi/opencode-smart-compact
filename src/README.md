@@ -1,6 +1,6 @@
 # src — Smart Compact Core
 
-Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, `command.transform` for `/magic-compact|trim|stats`, `tool.transform` for `compact_context` + `read_omitted_content`.
+Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, `command.transform` for `/magic-compact|trim|stats`, `tool.transform` for `compact_context` + `read_omitted_content` + `compact_stats`.
 
 ## Modules
 

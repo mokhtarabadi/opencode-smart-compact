@@ -10,7 +10,7 @@
  * pruned to a notice while the original is cached and retrievable.
  */
 import { Plugin } from "@opencode/plugin";
-import { compactNow, formatBudgetMeter, parseCompactArgs, scheduleTrim } from "./actions.js";
+import { compactNow, formatBudgetMeter, formatStats, parseCompactArgs, scheduleTrim } from "./actions.js";
 import { applySummaries } from "./apply.js";
 import {
   autoTrimResetLine,
@@ -34,6 +34,7 @@ const TRIM = "magic-trim";
 const STATS = "magic-stats";
 const TOOL = "read_omitted_content";
 const COMPACT_TOOL = "compact_context";
+const STATS_TOOL = "compact_stats";
 
 /** Parse an optional non-negative integer argument; throws on anything else. */
 function parseKeepTurns(text: string | undefined): number {
@@ -268,12 +269,7 @@ export default Plugin.define({
         description: "Show cumulative context savings for this session",
         async execute({ sessionID }) {
           const state = await loadState(ctx, sessionID);
-          const s = state.stats;
-          const text =
-            `[smart-compact] pruned ~${s.prunedTokens} tokens across ${s.prunedParts} tool results; ` +
-            `summarized ${s.summarizedTurns} turns; ${Object.keys(state.omissions).length} cached omissions; ` +
-            `memo-saved ~${s.savedTokens ?? 0} tokens; last run ${s.lastRunMs ?? 0}ms; ` +
-            `tokenizer ${s.tokenizerUsed ? "on" : "off"}.`;
+          const text = formatStats(state);
           console.log(text);
           await notify(ctx, sessionID, text);
         },
@@ -347,6 +343,24 @@ export default Plugin.define({
           return {
             content: `[smart-compact] summarized ${summarized} turn(s); bulky tool output will be trimmed on the next request.`,
           };
+        },
+      });
+
+      // Tool: read-only savings report, so the agent can see whether it is
+      // actually making room instead of asking the Manager to run the stats
+      // command. Same formatter as `/magic-stats`, so the numbers cannot drift.
+      editor.add({
+        name: STATS_TOOL,
+        description:
+          "Report this session's cumulative compaction savings: tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time and whether the tokenizer backed the run. Read-only, no inputs, safe to call at any time.",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        async execute(_input: unknown, context) {
+          const state = await loadState(ctx, context.sessionID);
+          return { content: formatStats(state) };
         },
       });
     });

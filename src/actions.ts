@@ -8,6 +8,7 @@ import { summarizeTurns } from "./summarize.js";
 import { isOverEmergencyBudget, loadConfig, type BudgetState } from "./config.js";
 import { measureTokens } from "./prune.js";
 import { loadState, saveState, type BackupPointer, type Ctx } from "./store.js";
+import type { SessionState } from "./types.js";
 
 export type CompactMode = "compact" | "trim";
 
@@ -99,6 +100,34 @@ export async function scheduleTrim(ctx: Ctx, sessionID: string, keepTurns: numbe
   const state = await loadState(ctx, sessionID);
   state.pending = { mode: "trim", keepTurns };
   await saveState(ctx, sessionID, state);
+}
+
+/**
+ * Pure formatter for the cumulative savings line.
+ * Why it lives here: `/magic-stats` and the agent-callable `compact_stats` tool
+ * must report identical numbers, so the text is built once for both lanes.
+ * Pure: no I/O, no config reads. Malformed or missing counters render as 0
+ * instead of NaN, because a stats read must never throw into a tool call.
+ * @param state per-session compaction state
+ */
+export function formatStats(state: SessionState): string {
+  // Display guards only — storage keeps the real counters.
+  const stats = state?.stats;
+  const num = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : 0;
+  const prunedTokens = num(stats?.prunedTokens);
+  const prunedParts = num(stats?.prunedParts);
+  const summarizedTurns = num(stats?.summarizedTurns);
+  const savedTokens = num(stats?.savedTokens);
+  const lastRunMs = num(stats?.lastRunMs);
+  const cached = state?.omissions && typeof state.omissions === "object" ? Object.keys(state.omissions).length : 0;
+  const tokenizer = stats?.tokenizerUsed === true ? "on" : "off";
+  return (
+    `[smart-compact] pruned ~${prunedTokens} tokens across ${prunedParts} tool results; ` +
+    `summarized ${summarizedTurns} turns; ${cached} cached omissions; ` +
+    `memo-saved ~${savedTokens} tokens; last run ${lastRunMs}ms; ` +
+    `tokenizer ${tokenizer}.`
+  );
 }
 
 /**

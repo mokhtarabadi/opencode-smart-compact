@@ -17,9 +17,9 @@ What it does to your context:
 - Always-prune tools: always pruned when outside recent window. Default: `read`.
 - Strategies run on prune pass: deduplication, purgeErrors (last 4 turns), stripReasoning (>500 chars).
 
-## 2. Tools YOU as agent can call — only these two
+## 2. Tools YOU as agent can call — only these three
 
-You do NOT call slash commands. Slash commands `/magic-compact`, `/magic-trim`, `/magic-stats` are Manager-only. You call these two tools with native tool-call JSON.
+You do NOT call slash commands. Slash commands `/magic-compact`, `/magic-trim`, `/magic-stats` are Manager-only. You call these three tools with native tool-call JSON.
 
 ### Tool A: compact_context — free context yourself
 
@@ -75,6 +75,34 @@ Call example: `read_omitted_content({"contentId":"omitted-0001"})`
 
 Returns: cached original text, possibly stale. If missing: `"No omitted content found for Content ID: X in this session. It was cleared by a newer compaction — rerun the tool..."` Then rerun source tool, do not retry IDs.
 
+### Tool C: compact_stats — read your own savings
+
+Description: Read-only report of what this session's compaction has reclaimed. Same numbers as `/magic-stats`, same formatter, so the two lanes cannot disagree.
+
+When to call it:
+
+- Before deciding whether to compact: if `summarized 0 turns` and the fill is high, the bulk is tool output, so a trim is the cheaper move.
+- After a compaction, once, when you need to report what it saved.
+- Never as a poll. It answers a question you already have, and it costs a tool call.
+
+Input schema:
+
+```json
+{}
+```
+
+No inputs. Extra properties are rejected.
+
+Call example: `compact_stats({})`
+
+Returns:
+
+```text
+[smart-compact] pruned ~130226 tokens across 213 tool results; summarized 0 turns; 13 cached omissions; memo-saved ~0 tokens; last run 1ms; tokenizer off.
+```
+
+Reading it: `prunedParts` counts tool results that were replaced, `cached omissions` is how many originals `read_omitted_content` can still return, `summarizedTurns` stays 0 unless a compaction with `mode: "compact"` ran, and `memo-saved` counts tokens never remeasured on repeat passes.
+
 ## 3. Rules for you
 
 1. Never ask Manager to run slash commands in autopilot/auto mode. Call `compact_context` yourself and chain next turn.
@@ -103,7 +131,7 @@ Returns: cached original text, possibly stale. If missing: `"No omitted content 
   "awareness": { "enabled": true, "warnRatio": 0.7, "emergencyRatio": 0.9, "rearmStep": 0.05, "autoTrimRatio": 0 }
 }
 ```
-5. Human tools are out of scope. Only the two tools above are agent-callable. Ignore file-system, shell, or Manager UI tools.
+5. Human tools are out of scope. Only the three tools above are agent-callable. Ignore file-system, shell, or Manager UI tools.
 
 ## 4. Minimal decision flow
 

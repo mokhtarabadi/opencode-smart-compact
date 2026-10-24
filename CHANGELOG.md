@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `compact_stats`: read-only agent tool reporting the same session savings as `/magic-stats` (tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run, tokenizer state). It takes no inputs, only reads storage, and shares `formatStats` with the slash command, so the Manager-facing and agent-facing numbers cannot drift.
+
 ### Fixed
 
 - O1 hotfix V1 duplicate keys: ranked prune no longer collapses duplicate callIds through a Map keyed by callId. Ranking uses unique per-entry ids with index order, both parts prune with distinct omission ids.
