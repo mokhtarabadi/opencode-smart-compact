@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Awareness denominator made visible: the resolved context window (`awarenessWindow`) and model name (`awarenessModel`) persist in session state, `compact_stats` ends with `window <tokens> (<model>)`, and an unknown model (or registry entry without `limit.context`) logs one `[smart-compact] awareness disabled` line per model instead of staying silently advisory-free. Silence-by-design is kept — no ratio is ever guessed — but it is now diagnosable from the stats line. Pinned by three `formatStats` tests and two hook-level tests.
 - `compact_stats`: read-only agent tool reporting the same session savings as `/magic-stats` (tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run, tokenizer state). It takes no inputs, only reads storage, and shares `formatStats` with the slash command, so the Manager-facing and agent-facing numbers cannot drift.
 
 ### Fixed

@@ -66,6 +66,19 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       typeof value.autoTrimLastRatio === "number" && Number.isFinite(value.autoTrimLastRatio)
         ? value.autoTrimLastRatio
         : undefined,
+    // The resolved window and model name survive a restart so the stats line
+    // can report them without waiting for the next awareness pass. Malformed
+    // values fall back to absent, which renders as "unknown".
+    awarenessWindow:
+      typeof value.awarenessWindow === "number" &&
+      Number.isFinite(value.awarenessWindow) &&
+      value.awarenessWindow > 0
+        ? Math.floor(value.awarenessWindow)
+        : undefined,
+    awarenessModel:
+      typeof value.awarenessModel === "string" && value.awarenessModel.length > 0
+        ? value.awarenessModel
+        : undefined,
   };
 }
 

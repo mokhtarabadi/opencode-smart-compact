@@ -122,11 +122,26 @@ export function formatStats(state: SessionState): string {
   const lastRunMs = num(stats?.lastRunMs);
   const cached = state?.omissions && typeof state.omissions === "object" ? Object.keys(state.omissions).length : 0;
   const tokenizer = stats?.tokenizerUsed === true ? "on" : "off";
+  // Awareness denominator, so a silent advisory is diagnosable from the same
+  // line: either the resolved window plus the model it came from, or the
+  // model the registry failed on. Malformed values render "unknown", never throw.
+  const windowTokens =
+    typeof state?.awarenessWindow === "number" && Number.isFinite(state.awarenessWindow) && state.awarenessWindow > 0
+      ? Math.floor(state.awarenessWindow)
+      : 0;
+  const modelName =
+    typeof state?.awarenessModel === "string" && state.awarenessModel.length > 0
+      ? state.awarenessModel
+      : "no model seen yet";
+  const windowPart =
+    windowTokens > 0
+      ? `window ${windowTokens} (${modelName})`
+      : `window unknown (${modelName} — awareness off)`;
   return (
     `[smart-compact] pruned ~${prunedTokens} tokens across ${prunedParts} tool results; ` +
     `summarized ${summarizedTurns} turns; ${cached} cached omissions; ` +
     `memo-saved ~${savedTokens} tokens; last run ${lastRunMs}ms; ` +
-    `tokenizer ${tokenizer}.`
+    `tokenizer ${tokenizer}; ${windowPart}.`
   );
 }
 

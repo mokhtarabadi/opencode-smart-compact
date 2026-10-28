@@ -161,11 +161,31 @@ async function runAwareness(
       : ((payload as { data?: ReadonlyArray<AwarenessModel> })?.data ?? []);
     const limitTokens = resolveContextLimit(modelRef, models);
     // An unknown model or a missing limit means no usable window size: stay
-    // silent instead of guessing a denominator.
-    if (!limitTokens) return;
+    // silent instead of guessing a denominator. Record the model and log once
+    // per model so the silence is diagnosable instead of invisible: without
+    // this, a session can sit at high fill with zero warnings and no clue why.
+    const modelKey = `${modelRef.providerID}/${modelRef.id}`;
+    const state = await loadState(ctx, sessionID);
+    if (!limitTokens) {
+      if (state.awarenessModel !== modelKey || state.awarenessWindow !== undefined) {
+        state.awarenessModel = modelKey;
+        state.awarenessWindow = undefined;
+        await saveState(ctx, sessionID, state);
+        console.log(
+          `[smart-compact] awareness disabled: unknown model ${modelKey} or missing context limit — ` +
+            `no pressure ratio can be computed, so no advisory will fire. ` +
+            `Check that the model registry entry carries limit.context.`,
+        );
+      }
+      return;
+    }
+    if (state.awarenessModel !== modelKey || state.awarenessWindow !== limitTokens) {
+      state.awarenessModel = modelKey;
+      state.awarenessWindow = limitTokens;
+      await saveState(ctx, sessionID, state);
+    }
     const usedTokens = measureVisibleTokens(messages);
     const ratio = usedTokens / limitTokens;
-    const state = await loadState(ctx, sessionID);
     // Lossless relief below the advisory threshold: schedule the tool-output
     // prune pass for the next request. Nothing is summarized and no user
     // message is touched, so this is safe to do without asking the agent.

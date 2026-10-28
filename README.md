@@ -50,7 +50,7 @@ or list it in `opencode.json(c)`:
 | `/magic-compact [N]` | Summarize old assistant turns, keeping the last `N` turns; prune bulky tool output. |
 | `/magic-trim [N]` | Prune bulky tool output only, without summarizing. |
 | `/magic-stats` | Report cumulative savings for the session as a visible message. |
-| `compact_stats` | Agent tool: same savings report, callable without the Manager. |
+| `compact_stats` | Agent tool: same savings report, callable without the Manager. Ends with the awareness denominator (`window <tokens> (<model>)`) or `window unknown (<model> — awareness off)` when the registry has no usable limit. |
 
 Compaction is scheduled by the command and applied on the next model request.
 
@@ -69,7 +69,7 @@ Compaction is scheduled by the command and applied on the next model request.
 
 ### The stats tool
 
-`compact_stats` reports the same cumulative figures as `/magic-stats` — tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time, tokenizer state — without the Manager having to run anything. It takes no inputs, only reads storage, and shares the formatter with the slash command, so the two lanes cannot report different numbers.
+`compact_stats` reports the same cumulative figures as `/magic-stats` — tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time, tokenizer state, and the awareness denominator — without the Manager having to run anything. It takes no inputs, only reads storage, and shares the formatter with the slash command, so the two lanes cannot report different numbers.
 
 ## Pruning rules
 

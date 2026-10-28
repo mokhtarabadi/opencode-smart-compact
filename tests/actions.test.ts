@@ -32,7 +32,8 @@ test("formatStats renders a fresh session as all zeros", () => {
   assert.equal(
     text,
     "[smart-compact] pruned ~0 tokens across 0 tool results; summarized 0 turns; " +
-      "0 cached omissions; memo-saved ~0 tokens; last run 0ms; tokenizer off.",
+      "0 cached omissions; memo-saved ~0 tokens; last run 0ms; tokenizer off; " +
+      "window unknown (no model seen yet — awareness off).",
   );
 });
 
@@ -53,7 +54,7 @@ test("formatStats reports counters, cache size and tokenizer state", () => {
   const text = formatStats(state);
   assert.match(text, /pruned ~1200 tokens across 9 tool results/);
   assert.match(text, /summarized 4 turns; 1 cached omissions/);
-  assert.match(text, /memo-saved ~300 tokens; last run 12ms; tokenizer on\./);
+  assert.match(text, /memo-saved ~300 tokens; last run 12ms; tokenizer on;/);
 });
 
 test("formatStats never renders NaN for malformed counters", () => {
@@ -61,5 +62,30 @@ test("formatStats never renders NaN for malformed counters", () => {
   state.stats = { prunedTokens: Number.NaN, summarizedTurns: 2, prunedParts: 1, savedTokens: 0 };
   const text = formatStats(state);
   assert.match(text, /pruned ~0 tokens/);
+  assert.equal(text.includes("NaN"), false);
+});
+
+test("formatStats names the resolved window and model", () => {
+  const state = emptyState();
+  state.awarenessWindow = 1048576;
+  state.awarenessModel = "opencode-go/muse-spark-1.3-contributor";
+  const text = formatStats(state);
+  assert.match(text, /window 1048576 \(opencode-go\/muse-spark-1\.3-contributor\)\./);
+});
+
+test("formatStats names the model the registry failed on", () => {
+  const state = emptyState();
+  state.awarenessWindow = undefined;
+  state.awarenessModel = "custom/acme-1";
+  const text = formatStats(state);
+  assert.match(text, /window unknown \(custom\/acme-1 — awareness off\)\./);
+});
+
+test("formatStats never renders NaN for a malformed window", () => {
+  const state = emptyState();
+  state.awarenessWindow = Number.NaN;
+  state.awarenessModel = "";
+  const text = formatStats(state);
+  assert.match(text, /window unknown \(no model seen yet — awareness off\)\./);
   assert.equal(text.includes("NaN"), false);
 });

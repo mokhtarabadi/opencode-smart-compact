@@ -91,6 +91,19 @@ export interface SessionState {
    * fill drops below the auto-trim line by one re-arm step.
    */
   autoTrimLastRatio?: number;
+  /**
+   * Resolved context window in tokens from the last awareness pass. Absent
+   * when the session model is unknown to the registry or carries no usable
+   * limit — in which case no ratio can be computed and the advisory stays
+   * silent. Surfaced in `compact_stats` so silence is diagnosable.
+   */
+  awarenessWindow?: number;
+  /**
+   * "providerID/id" of the model seen on the last awareness pass. Recorded
+   * even when the window is unknown, so the stats line can name the model
+   * the registry failed on.
+   */
+  awarenessModel?: string;
 }
 
 export function emptyState(): SessionState {

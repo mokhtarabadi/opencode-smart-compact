@@ -380,3 +380,38 @@ test("a downgrade from emergency back to warn does not re-fire on its own", asyn
   await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 1);
 });
+
+test("an unknown model records its name with no window, staying silent", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  await h.hook({
+    sessionID: "ses-unknown",
+    model: { providerID: "custom", id: "acme-1" },
+    system,
+    messages: [bigMessage(32000)],
+  });
+  assert.equal(system.length, 0);
+  const state = h.storage.get("session:ses-unknown") as {
+    awarenessWindow?: unknown;
+    awarenessModel?: unknown;
+  };
+  assert.equal(state.awarenessWindow, undefined);
+  assert.equal(state.awarenessModel, "custom/acme-1");
+});
+
+test("a resolved model records its window in state", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  await h.hook({
+    sessionID: "ses-known",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [bigMessage(100)],
+  });
+  const state = h.storage.get("session:ses-known") as {
+    awarenessWindow?: unknown;
+    awarenessModel?: unknown;
+  };
+  assert.equal(state.awarenessWindow, 10_000);
+  assert.equal(state.awarenessModel, "test/model-x");
+});
