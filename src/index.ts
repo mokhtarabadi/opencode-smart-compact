@@ -213,15 +213,21 @@ async function runAwareness(
     if (ratio < awareness.warnRatio) return;
     const level = getAwarenessLevel(ratio, awareness);
     if (level === "none") return;
-    if (
-      !shouldFireAwareness(
-        ratio,
-        level,
-        { lastRatio: state.awarenessLastRatio, lastLevel: state.awarenessLastLevel },
-        awareness.rearmStep,
-      )
-    ) {
-      return;
+    // Emergency re-fires on every request while the pressure stays at or
+    // above the emergency line: a heads-down agent must not get one nudge and
+    // then silence. The single-shot latch below applies to warn only; the
+    // hysteresis clear above still clears both levels once the fill drops.
+    if (level !== "emergency") {
+      if (
+        !shouldFireAwareness(
+          ratio,
+          level,
+          { lastRatio: state.awarenessLastRatio, lastLevel: state.awarenessLastLevel },
+          awareness.rearmStep,
+        )
+      ) {
+        return;
+      }
     }
     const text = buildAwarenessMessage({
       usedTokens,

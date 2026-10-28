@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Awareness reminder made unmissable: `buildAwarenessMessage` (`src/awareness.ts`) now opens with the action itself as a command ("ACT NOW" / "COMPACT NOW" naming `compact_context` first), states the fill vs hard limit, and names the loss if ignored (overflow drops in-flight work); still advisory-only, never aborts a step. Defaults retuned to `warnRatio 0.5` / `emergencyRatio 0.8` (`src/config.ts`, README updated) so the lower-bound measurement fires before the window is effectively gone. Emergency re-fires on every `runAwareness` while at or above the emergency line until the latch clears automatically below `warnRatio` minus `rearmStep`; warn keeps single-shot plus re-arm-step behavior (`src/index.ts`).
 - `package.json` completed for publishing: exports map, `files` allowlist, `@opencode/plugin` peer dependency, repository metadata, engines, and package scripts; version bumped to 0.2.0.
 - Summaries now preserve tool-call/tool-result/media structure and replace only prose and reasoning, instead of collapsing the whole assistant message.
 - Summarization runs in the command handler via `ctx.generate.text`, out of the `context` hook.

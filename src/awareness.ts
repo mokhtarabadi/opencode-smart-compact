@@ -183,13 +183,17 @@ export function autoTrimResetLine(autoTrimRatio: number, rearmStep: number): num
 }
 
 /**
- * The professional reminder addressed to the agent.
+ * The unmissable directive addressed to the agent.
  *
+ * The first line is the action itself — the exact tool to call, stated as a
+ * command, not a suggestion — because the reminder rides on the outgoing
+ * model call as one system part and is easy to skim past mid-implementation.
  * It states the current fill of the context window with the numbers behind
- * it, names the exact tool to call and where to find it, tells the agent to
- * re-orient on the project before compacting so the thread of the request
- * survives, and keeps the whole thing advisory: the agent decides when it is
- * safe to compact and no step is ever aborted.
+ * it, what is lost if it is ignored (overflow drops in-flight work and it
+ * cannot be recovered), names the exact tool to call and where to find it,
+ * and tells the agent to re-orient on the project before compacting so the
+ * thread of the request survives. It keeps the whole thing advisory: the
+ * agent decides when it is safe to compact and no step is ever aborted.
  */
 export function buildAwarenessMessage(args: {
   usedTokens: number;
@@ -197,14 +201,22 @@ export function buildAwarenessMessage(args: {
   ratioPct: number;
   level: AwarenessWarnLevel;
 }): string {
-  const emergency = args.level === "emergency";
-  const status = emergency
-    ? "emergency context pressure - immediate action advised"
-    : "elevated context pressure - plan compaction soon";
-  return [
-    `[smart-compact] CONTEXT PRESSURE - ${args.ratioPct}% of the context window is in use (about ${args.usedTokens} of ${args.limitTokens} measured tokens).`,
+  const { usedTokens, limitTokens, ratioPct, level } = args;
+  const isEmergency = level === "emergency";
+  const status = isEmergency
+    ? "emergency context pressure - immediate action required"
+    : "elevated context pressure - compaction required now";
+  const firstLine = isEmergency
+    ? "COMPACT NOW — search your tool list for `compact_context` and call it immediately."
+    : "ACT NOW — search your tool list for `compact_context` and call it before continuing.";
+  const lines: string[] = [
+    firstLine,
+    "",
+    `[smart-compact] CONTEXT PRESSURE - ${ratioPct}% of the context window is in use (about ${usedTokens} of ${limitTokens} measured tokens).`,
     "",
     `Status: ${status}. The measured fill is a lower bound: it counts only the model-visible messages, while provider system prompts and tool schemas are invisible to the plugin, so the true usage is higher than this number.`,
+    "",
+    "If you ignore this and the session overflows, in-flight work is dropped and cannot be recovered. Do not let sessions or turns silently overflow.",
     "",
     "What to do now:",
     "1. Search your own tool list for `compact_context` and call it. `/magic-compact` is the Manager-only manual equivalent - never ask the Manager to run a slash command.",
@@ -214,5 +226,6 @@ export function buildAwarenessMessage(args: {
     "Rules:",
     "- Advisory only. If you are mid-critical-step, finish that step and compact right after. Never abort a half-written edit, a running tool call, or a commit sequence to compact.",
     "- User messages are never summarized. Pruned tool output stays retrievable via read_omitted_content by Content ID.",
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }

@@ -66,12 +66,14 @@ test("resolveContextLimit returns undefined for a miss or an unusable limit", ()
 });
 
 test("getAwarenessLevel maps the ratio to none, warn, and emergency", () => {
-  const cfg = { warnRatio: 0.7, emergencyRatio: 0.9 };
-  assert.equal(getAwarenessLevel(0.69, cfg), "none");
-  assert.equal(getAwarenessLevel(0.7, cfg), "warn");
-  assert.equal(getAwarenessLevel(0.89, cfg), "warn");
-  assert.equal(getAwarenessLevel(0.9, cfg), "emergency");
+  const cfg = { warnRatio: 0.5, emergencyRatio: 0.8 };
+  assert.equal(getAwarenessLevel(0.49, cfg), "none");
+  assert.equal(getAwarenessLevel(0.5, cfg), "warn");
+  assert.equal(getAwarenessLevel(0.79, cfg), "warn");
+  assert.equal(getAwarenessLevel(0.8, cfg), "emergency");
+  assert.equal(getAwarenessLevel(1.2, cfg), "emergency");
   assert.equal(getAwarenessLevel(Number.NaN, cfg), "none");
+  assert.equal(getAwarenessLevel(-0.1, cfg), "none");
 });
 
 test("shouldFireAwareness fires on the first crossing and stays quiet on a repeat", () => {
@@ -97,11 +99,17 @@ test("buildAwarenessMessage states the fill, the tool, and the advisory rules", 
     ratioPct: 72,
     level: "warn",
   });
+  // The action comes first, as a command — impossible to skim past.
+  const firstLine = text.split("\n")[0]!;
+  assert.match(firstLine, /compact_context/);
+  assert.match(firstLine, /ACT NOW/);
   // The live status of the context window.
   assert.match(text, /72%/);
   assert.match(text, /104000/);
   assert.match(text, /145000/);
   assert.match(text, /lower bound/);
+  // What is lost if the reminder is ignored.
+  assert.match(text, /dropped/);
   // The tool to call and where to find it.
   assert.match(text, /compact_context/);
   assert.match(text, /magic-compact/);
@@ -118,6 +126,8 @@ test("buildAwarenessMessage states the fill, the tool, and the advisory rules", 
   assert.match(text, /Never abort a half-written edit/);
   assert.match(text, /user messages are never summarized/i);
   assert.match(text, /read_omitted_content/);
+  // Warn status names the required action.
+  assert.match(text, /elevated context pressure/);
 });
 
 test("buildAwarenessMessage escalates the wording at the emergency level", () => {
@@ -127,8 +137,12 @@ test("buildAwarenessMessage escalates the wording at the emergency level", () =>
     ratioPct: 95,
     level: "emergency",
   });
+  const firstLine = text.split("\n")[0]!;
+  assert.match(firstLine, /compact_context/);
+  assert.match(firstLine, /COMPACT NOW/);
   assert.match(text, /95%/);
   assert.match(text, /emergency context pressure/);
+  assert.match(text, /dropped/);
 });
 
 test("shouldAutoTrim fires on the first crossing and only re-arms after a step", () => {

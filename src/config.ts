@@ -92,7 +92,7 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     stripReasoning: { enabled: true, thresholdChars: 500 },
   },
   tokens: { enabled: false, emergencyBudgetTokens: 50000 },
-  awareness: { enabled: true, warnRatio: 0.7, emergencyRatio: 0.9, rearmStep: 0.05, autoTrimRatio: 0 },
+  awareness: { enabled: true, warnRatio: 0.5, emergencyRatio: 0.8, rearmStep: 0.05, autoTrimRatio: 0 },
 };
 
 /** Strip JSONC comments and trailing commas. Best-effort; never throws. */

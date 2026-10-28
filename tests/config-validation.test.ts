@@ -67,8 +67,8 @@ test("loadConfig merges project config and warns on unknown keys", async () => {
 test("awareness defaults are on with the approved thresholds", () => {
   assert.deepEqual(DEFAULT_CONFIG.awareness, {
     enabled: true,
-    warnRatio: 0.7,
-    emergencyRatio: 0.9,
+    warnRatio: 0.5,
+    emergencyRatio: 0.8,
     rearmStep: 0.05,
     autoTrimRatio: 0,
   });
@@ -97,11 +97,11 @@ test("loadConfig overrides one awareness key and keeps its siblings", async () =
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "smart-compact-awareness-"));
   mkdirSync(join(dir, ".opencode"), { recursive: true });
-  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"warnRatio": 0.5}}');
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), '{"awareness": {"warnRatio": 0.6}}');
   const { loadConfig } = await import("../src/config.js");
   const config = await loadConfig({ location: { directory: dir } } as never);
-  assert.equal(config.awareness.warnRatio, 0.5);
-  assert.equal(config.awareness.emergencyRatio, 0.9);
+  assert.equal(config.awareness.warnRatio, 0.6);
+  assert.equal(config.awareness.emergencyRatio, 0.8);
   assert.equal(config.awareness.rearmStep, 0.05);
   assert.equal(config.awareness.enabled, true);
 });
@@ -121,7 +121,7 @@ test("loadConfig drops invalid awareness values back to the defaults", async () 
   try {
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig({ location: { directory: dir } } as never);
-    assert.equal(config.awareness.warnRatio, 0.7);
+    assert.equal(config.awareness.warnRatio, 0.5);
     assert.equal(config.awareness.rearmStep, 0.05);
   } finally {
     console.warn = original;

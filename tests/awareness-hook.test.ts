@@ -95,12 +95,12 @@ test("the context hook pushes one advisory system part when the window fills", a
     sessionID: "ses-test",
     model: { providerID: "test", id: "model-x" },
     system,
-    messages: [bigMessage(32000)],
+    messages: [bigMessage(20000)],
   });
   assert.equal(system.length, 1);
   assert.equal(system[0]!.type, "text");
   assert.match(system[0]!.text, /CONTEXT PRESSURE/);
-  assert.match(system[0]!.text, /80%/);
+  assert.match(system[0]!.text, /50%/);
   assert.match(system[0]!.text, /compact_context/);
 });
 
@@ -111,7 +111,7 @@ test("the reminder fires once per crossing and re-arms only after a further step
     sessionID: "ses-test",
     model: { providerID: "test", id: "model-x" },
     system,
-    messages: [bigMessage(32000)],
+    messages: [bigMessage(20000)],
   };
   await h.hook(event);
   assert.equal(system.length, 1);
@@ -119,11 +119,11 @@ test("the reminder fires once per crossing and re-arms only after a further step
   await h.hook(event);
   assert.equal(system.length, 1);
   // A small growth stays below the re-arm step.
-  const grew = { ...event, messages: [bigMessage(32400)] };
+  const grew = { ...event, messages: [bigMessage(20400)] };
   await h.hook(grew);
   assert.equal(system.length, 1);
   // A further step re-arms the reminder.
-  const grewMore = { ...event, messages: [bigMessage(36000)] };
+  const grewMore = { ...event, messages: [bigMessage(22000)] };
   await h.hook(grewMore);
   assert.equal(system.length, 2);
 });
@@ -136,10 +136,10 @@ test("a session back under the threshold clears the latch and warns again later"
     model: { providerID: "test", id: "model-x" },
     system,
   };
-  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 1);
   await h.hook({ ...base, messages: [bigMessage(100)] });
-  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 2);
 });
 
@@ -220,8 +220,8 @@ test("autoTrimRatio queues a lossless trim below the advisory threshold", async 
   // 25 percent: below the auto-trim line, nothing is queued.
   await h.hook({ ...base, messages: [bigMessage(10000)] });
   assert.equal((h.storage.get("session:ses-auto") as { pending?: unknown } | undefined)?.pending ?? null, null);
-  // 50 percent: above the line but below warnRatio, so a trim is queued silently.
-  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  // 40 percent: above the auto-trim line but below warnRatio, so a trim is queued silently.
+  await h.hook({ ...base, messages: [bigMessage(16000)] });
   const state = h.storage.get("session:ses-auto") as { pending?: unknown };
   assert.deepEqual(state.pending, { mode: "trim", keepTurns: 0 });
   // Trimming is lossless, so no advisory is posted at this fill.
@@ -314,13 +314,13 @@ test("a session hovering at the threshold does not re-fire on every request", as
     model: { providerID: "test", id: "model-x" },
     system,
   };
-  // 80 percent: the reminder fires.
-  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  // 50 percent: the reminder fires.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 1);
-  // 69 percent: just under the threshold, but not far enough to clear the latch.
-  await h.hook({ ...base, messages: [bigMessage(27600)] });
-  // 80 percent again: the latch still holds, so no second nudge.
-  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  // 49 percent: just under the threshold, but not far enough to clear the latch.
+  await h.hook({ ...base, messages: [bigMessage(19600)] });
+  // 50 percent again: the latch still holds, so no second nudge.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 1);
 });
 
@@ -339,6 +339,31 @@ test("the hook escalates the wording past the emergency threshold", async () => 
   assert.match(system[0]!.text, /emergency context pressure/);
 });
 
+test("emergency re-fires on every request until the pressure drops", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  const base = {
+    sessionID: "ses-emergency",
+    model: { providerID: "test", id: "model-x" },
+    system,
+  };
+  // 80 percent: at the emergency line, the single-shot latch is bypassed.
+  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  assert.equal(system.length, 1);
+  assert.match(system[0]!.text, /COMPACT NOW/);
+  // Same fill again: still re-fires — no silent single-shot at emergency.
+  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  assert.equal(system.length, 2);
+  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  assert.equal(system.length, 3);
+  // Dropping below the clear line (warn minus re-arm step = 45 percent)
+  // clears the latch, so the next rise warns again with warn wording.
+  await h.hook({ ...base, messages: [bigMessage(100)] });
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
+  assert.equal(system.length, 4);
+  assert.match(system[3]!.text, /ACT NOW/);
+});
+
 test("a downgrade from emergency back to warn does not re-fire on its own", async () => {
   const h = await harness({ limitContext: 10_000 });
   const system: Array<{ type: string; text: string }> = [];
@@ -350,8 +375,8 @@ test("a downgrade from emergency back to warn does not re-fire on its own", asyn
   // 95 percent: emergency wording.
   await h.hook({ ...base, messages: [bigMessage(38000)] });
   assert.equal(system.length, 1);
-  // 80 percent: the level drops back to warn, but the fill did not grow, so
-  // the latch holds and nothing is pushed.
-  await h.hook({ ...base, messages: [bigMessage(32000)] });
+  // 50 percent: the level drops back to warn, but the fill did not grow, so
+  // the warn gate holds and nothing is pushed.
+  await h.hook({ ...base, messages: [bigMessage(20000)] });
   assert.equal(system.length, 1);
 });
