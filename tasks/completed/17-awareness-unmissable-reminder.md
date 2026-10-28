@@ -4,6 +4,7 @@
 **Source:** manager (2026-10-28, after an agent ran 100+ turns without compacting despite the advisory reminder)
 **Type:** feature
 **Status:** closed
+**Finished:** 2026-10-28T10:13:03Z
 **Submitted:** 2026-10-28T09:18:42Z
 
 ## Goal
@@ -88,9 +89,7 @@ Make the smart-compact pressure reminder impossible to silently ignore: reword i
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-No code changes detected or staged.
-```
+**Factual Git Diff:** Stored in Commit Hash: `cc78cc05d43239dce75a6520b5332419550dcc87`
 <!-- END_GIT_DIFF -->
 
 ## Closure
