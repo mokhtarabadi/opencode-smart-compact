@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode/plugin";
+import type { Schema } from "effect";
 import { emptyState, type SessionState } from "./types.js";
 
 /** The plugin context handed to `setup`. */
@@ -84,7 +85,7 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
 
 /** Persist the session state. */
 export async function saveState(ctx: Ctx, sessionID: string, state: SessionState): Promise<void> {
-  await ctx.storage.set(key(sessionID), state as unknown as Parameters<typeof ctx.storage.set>[1]);
+  await ctx.storage.set(key(sessionID), state as unknown as Schema.Json);
 }
 
 /** Remove all persisted state for a session. */
@@ -170,7 +171,7 @@ export async function writeBackupPointer(
   // Filter to valid entries only — malformed history never accumulates (V3).
   const existing = Array.isArray(raw) ? (raw as unknown[]).filter(isValidBackupPointer) : [];
   const next = capBackupPointers([...existing, pointer]);
-  await ctx.storage.set(backupKey(sessionId), next as unknown as Parameters<typeof ctx.storage.set>[1]);
+  await ctx.storage.set(backupKey(sessionId), next as unknown as Schema.Json);
   return pointer;
 }
 

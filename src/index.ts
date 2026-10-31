@@ -268,7 +268,8 @@ export default Plugin.define({
   id: "smart-compact",
   async setup(ctx) {
     // Commands: summarize now, schedule the pruning pass for the next request.
-    await ctx.command.transform((editor) => {
+    try {
+      await ctx.command.transform((editor) => {
       editor.add({
         name: COMPACT,
         description: "Lossless context compression (optional: number of recent turns to keep)",
@@ -301,10 +302,14 @@ export default Plugin.define({
         },
       });
     });
+    } catch (error) {
+      console.warn(`[smart-compact] ctx.command.transform failed: ${(error as Error)?.message ?? error}`);
+    }
 
     // Tool: retrieve a pruned tool result by its Content ID, scoped to the
     // calling session so one session can never read another's cache.
-    await ctx.tool.transform((editor) => {
+    try {
+      await ctx.tool.transform((editor) => {
       editor.add({
         name: TOOL,
         description:
@@ -390,11 +395,15 @@ export default Plugin.define({
         },
       });
     });
+    } catch (error) {
+      console.warn(`[smart-compact] ctx.tool.transform failed: ${(error as Error)?.message ?? error}`);
+    }
 
     // Context hook: apply compaction to every model request. Summaries are
     // generated at command time; here we only run the one-shot strategy/prune
     // pass and re-apply the stored state (mutation is per-request, not persisted).
-    await ctx.session.hook("context", async (event) => {
+    try {
+      await ctx.session.hook("context", async (event) => {
       const sessionID = (event as { sessionID?: string }).sessionID;
       if (!sessionID) return;
       const messages = (event as { messages?: unknown }).messages as Msg[] | undefined;
@@ -405,7 +414,11 @@ export default Plugin.define({
 
       const state = await loadState(ctx, sessionID);
       if (state.pending) {
-        await runPrune(ctx, sessionID, messages, config);
+        try {
+          await runPrune(ctx, sessionID, messages, config);
+        } catch (error) {
+          console.warn(`[smart-compact] runPrune failed for ${sessionID}: ${(error as Error)?.message ?? error}`);
+        }
       }
       const fresh = await loadState(ctx, sessionID);
       applySummaries(messages, fresh);
@@ -413,5 +426,12 @@ export default Plugin.define({
       // Awareness runs last so it measures exactly what the model receives.
       await runAwareness(ctx, sessionID, event, messages, config);
     });
+    } catch (error) {
+      console.warn(`[smart-compact] ctx.session.hook failed: ${(error as Error)?.message ?? error}`);
+    }
+
+    return async () => {
+      // Cleanup: no timers or in-memory caches are held; durable storage persists.
+    };
   },
 });
