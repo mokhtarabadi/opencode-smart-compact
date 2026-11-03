@@ -20,7 +20,7 @@ Because the transcript is never modified, a compaction can be recomputed from st
 - **Verbatim user messages** — your instructions are never summarized away.
 - **Retrievable pruning** — bulky completed tool output is replaced with a notice; the original is cached and can be read back with `read_omitted_content`.
 - **Automatic strategies** — repeated identical tool calls are deduplicated (newest kept) and the arguments of stale errored tool calls are blanked.
-- **Zero ongoing prompt overhead** — compaction is command-driven, not a background loop, so cache invalidation happens once per compaction.
+- **Zero ongoing prompt overhead** — summarization is command-driven, not a background loop, so cache invalidation happens once per compaction; only the lossless tool-output trim runs automatically at the configured pressure.
 - **Observable** — `/magic-stats` reports tokens pruned, turns summarized, and cached omissions, and the agent-callable `compact_stats` tool reports the same figures without the Manager.
 
 ## Installation
@@ -69,11 +69,12 @@ Compaction is scheduled by the command and applied on the next model request.
 
 ### The stats tool
 
-`compact_stats` reports the same cumulative figures as `/magic-stats` — tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time, tokenizer state, and the awareness denominator — without the Manager having to run anything. It takes no inputs, only reads storage, and shares the formatter with the slash command, so the two lanes cannot report different numbers.
+`compact_stats` reports the same cumulative figures as `/magic-stats` — plugin version, tokens pruned, tool results trimmed, turns summarized with their heuristic fallbacks, cached omissions, last run time, which measurement path produced the numbers (tokenizer or heuristic), and the awareness denominator — without the Manager having to run anything. It takes no inputs, only reads storage, and shares the formatter with the slash command, so the two lanes cannot report different numbers.
 
 ## Pruning rules
 
-- Completed tool results over the configured size limit (default 1024 chars / 128 words) are pruned to a notice; the original is cached.
+- Completed tool results over the configured size limit (default 1024 chars / 128 words) are pruned to a notice; the original is cached in a per-session file store, not in the session state blob.
+- The omission store is bounded (500 files / 8 MiB per session, oldest evicted first), and a single `read_omitted_content` response is capped at 20000 characters with an explicit truncation notice.
 - With `pruning.useTokens`, the word thresholds double as token budgets and measured tokens decide instead of chars/words.
 - The preserve-recent window (default last 2 turns, plus always the last user message) keeps full text; sessions with no user message get no window.
 - Results over `truncateToolsChars` (default 1024) are pruned even under the size limit; `task` keeps its higher bar and is never capped below `taskMaxChars`.
@@ -125,26 +126,27 @@ Copy this recommended file to `~/.config/opencode/smart-compact.jsonc` for the b
     "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] },
     "stripReasoning": { "enabled": true, "thresholdChars": 500 }
   },
-  "tokens": { "enabled": true, "emergencyBudgetTokens": 50000 },
+  "tokens": { "enabled": true, "emergencyBudgetTokens": 0, "emergencyBudgetRatio": 0.6 },
   "awareness": {
     "enabled": true,
     "warnRatio": 0.5,
     "emergencyRatio": 0.8,
     "rearmStep": 0.05,
-    "autoTrimRatio": 0
+    "autoTrimRatio": 0.55,
+    "contextWindowTokens": 0
   }
 }
 ```
 
-`tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. Unknown config keys produce a warning naming the exact key path. When measured cost exceeds `emergencyBudgetTokens` (0 disables) the run warns and still compacts: the budget is an early signal that a session is getting large, never a gate, because refusing to compact an over-budget session would deadlock it. `/magic-stats` also reports memo-saved tokens, last-run time, and whether the tokenizer backed the run.
+`tokens.enabled` routes measurements through the optional `@anthropic-ai/tokenizer` package when installed, with the built-in estimate as fallback. The built-in estimate assumes about four characters per token, while tool JSON and code usually sit closer to 3.2–3.5, so treat the reported numbers as a lower bound. Unknown config keys produce a warning naming the exact key path. The emergency budget scales with the model: `emergencyBudgetTokens` pins an exact number, and when it is `0` the budget is `emergencyBudgetRatio` (default `0.6`) of the resolved context window. With no known window — or with `emergencyBudgetRatio: 0` — the warning stays off instead of firing against a guessed denominator. **Migration:** `emergencyBudgetTokens: 0` now means "derive from the window" rather than "disable". If you previously set it to `0` to silence the warning, set `emergencyBudgetRatio` to `0` instead; a positive `emergencyBudgetTokens` still pins an exact number and behaves exactly as before. When the measured cost exceeds the effective budget the run warns and still compacts: the budget is an early signal that a session is getting large, never a gate, because refusing to compact an over-budget session would deadlock it. `/magic-stats` also reports the plugin version, the measurement path that produced the numbers, heuristic-summary fallbacks, and the last-run time.
 
-`awareness` is the context-pressure reminder. When the model-visible context of a session crosses `warnRatio` (default `0.5`) of the model's context window, the agent gets an unmissable directive on the next model call: the first line is the action itself ("ACT NOW — search your tool list for `compact_context` and call it"), followed by the current fill percentage with the token numbers behind it, what is lost if it is ignored (overflow drops in-flight work), and a reminder to re-orient on the project before compacting. It is advisory only: the plugin never summarizes on its own, never aborts a step, and never mutates stored history. At warn level it fires once per crossing and re-arms only after the fill grows by `rearmStep`; at `emergencyRatio` (default `0.8`) it re-fires on every request until the pressure drops, so a heads-down agent cannot get one nudge and then silence. The latch clears automatically once the fill drops below `warnRatio` minus `rearmStep`. The measured percentage is a lower bound, because provider system prompts and tool schemas are invisible to the plugin. Set `awareness.enabled` to `false` to silence it.
+`awareness` is the context-pressure reminder. When the model-visible context of a session crosses `warnRatio` (default `0.5`) of the model's context window, the agent gets an unmissable directive on the next model call: the first line is the action itself ("ACT NOW — search your tool list for `compact_context` and call it"), followed by the current fill percentage with the token numbers behind it, what is lost if it is ignored (overflow drops in-flight work), and a reminder to re-orient on the project before compacting. It is advisory only: the plugin never summarizes on its own, never aborts a step, and never mutates stored history. At warn level it fires once per crossing and re-arms only after the fill grows by `rearmStep`; at `emergencyRatio` (default `0.8`) it re-fires on every request until the pressure drops, so a heads-down agent cannot get one nudge and then silence. The latch clears automatically once the fill drops below `warnRatio` minus `rearmStep`. The measured percentage is a lower bound, because provider system prompts and tool schemas are invisible to the plugin. When a provider's model entry carries no `limit.context`, set `awareness.contextWindowTokens` to a fallback window: the reminder then states that the denominator is configured rather than measured. With neither a registry limit nor a configured fallback the advisory stays silent. Set `awareness.enabled` to `false` to silence it.
 
-`awareness.autoTrimRatio` is the one automatic action, and it is lossless: at or above that fill the plugin queues a tool-output-only trim for the next request, so bulky completed tool results become notices while their originals stay cached under a Content ID. No turn is summarized, no user message is touched, and a compaction already queued is never overwritten. One sustained high-pressure period trims once: after the queued trim is consumed the per-session latch keeps the next request quiet, and it re-arms either once the fill has grown by a re-arm step, or after it drops below the line and rises again. `0` (the default) disables it; a 1M-token window rarely needs it before the advisory fires, while a 200K window benefits from setting it near `warnRatio`.
+`awareness.autoTrimRatio` is the one automatic action, and it is lossless: at or above that fill the plugin queues a tool-output-only trim for the next request, so bulky completed tool results become notices while their originals stay cached under a Content ID. No turn is summarized, no user message is touched, and a compaction already queued is never overwritten. It is armed by default at `0.55`, just above `warnRatio`, so a long session reclaims tool output without anyone remembering to call `compact_context`. One sustained high-pressure period trims once: after the queued trim is consumed the per-session latch keeps the next request quiet, and it re-arms either once the fill has grown by a re-arm step, or after it drops below the line and rises again. `0` disables it.
 
 ## Comparison
 
-Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and never summarizes a turn without being asked. The trade-off is that compaction is agent-driven rather than automatic — the context-pressure reminder only tells the agent how full the window is and what to call; the agent (or you) still decides when to summarize. Tool-output trimming is the exception: with `awareness.autoTrimRatio` set it runs on its own at that fill, and it is lossless because every pruned original stays cached.
+Compared with runtime context managers that compress inside the agent loop, Smart Compact is deliberately explicit: it compacts once on your command, preserves user messages verbatim, keeps tool structure, and never summarizes a turn without being asked. The trade-off is that compaction is agent-driven rather than automatic — the context-pressure reminder only tells the agent how full the window is and what to call; the agent (or you) still decides when to summarize. Tool-output trimming is the exception: armed by default at `awareness.autoTrimRatio`, it runs on its own at that fill, and it is lossless because every pruned original stays cached.
 
 ## Development
 
@@ -155,7 +157,7 @@ npm test            # compiles src + tests, runs node --test
 npm run verify:package   # validates the npm payload
 ```
 
-Source layout: `src/index.ts` (plugin entry), `plan.ts` (turn planning), `summarize.ts` (per-turn summaries), `apply.ts` (summary application), `prune.ts` (tool-result pruning), `strategies.ts` (deduplication, purge-errors), `awareness.ts` (context-pressure reminder), `config.ts`, `store.ts` (per-session state).
+Source layout: `src/index.ts` (plugin entry), `plan.ts` (turn planning), `summarize.ts` (per-turn summaries), `apply.ts` (summary application), `prune.ts` (tool-result pruning), `omissions.ts` (bounded on-disk original store and retrieval cap), `strategies.ts` (deduplication, purge-errors), `awareness.ts` (context-pressure reminder), `config.ts`, `store.ts` (per-session state), `version.ts` (package version for stats).
 
 ## Releasing
 

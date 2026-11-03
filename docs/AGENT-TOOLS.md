@@ -10,7 +10,7 @@ What it does to your context:
 
 - User messages: always kept verbatim, never summarized.
 - Old assistant turns: each replaced by its own 2-4 sentence summary. Restored from `state.summaries` by message ID.
-- Bulky tool results: pruned to `[omitted tool output ... Content ID: omitted-XXXX]` notice. Original cached in `state.omissions`, retrievable.
+- Bulky tool results: pruned to `[omitted tool output ... Content ID: omitted-XXXX]` notice. Original cached in a bounded per-session file store (state keeps only the id-to-path mapping), retrievable with a 20000-character response cap.
 - Recent window: last user message + `preserveRecentTurns` (default 2 turns) is never pruned.
 - Discard tools: replaced with fixed short text, never cached. Default: `todowrite -> "Successfully updated todos."`, `skill -> "Skill contents omitted..."`.
 - Protected tools: never pruned. Default: `question`.
@@ -73,7 +73,7 @@ Input schema:
 
 Call example: `read_omitted_content({"contentId":"omitted-0001"})`
 
-Returns: cached original text, possibly stale. If missing: `"No omitted content found for Content ID: X in this session. It was cleared by a newer compaction — rerun the tool..."` Then rerun source tool, do not retry IDs.
+Returns: cached original text, possibly stale, capped at 20000 characters with an explicit `TRUNCATED` notice naming the Content ID and both sizes. An unknown ID returns `"No omitted content found for Content ID: X in this session..."`; a known ID whose file was evicted or cleared returns `"[omitted tool output unavailable — the cached original for Content ID: X was cleared by a newer compaction. Rerun the tool to reproduce it.]"` Then rerun source tool, do not retry IDs.
 
 ### Tool C: compact_stats — read your own savings
 
@@ -98,16 +98,16 @@ Call example: `compact_stats({})`
 Returns:
 
 ```text
-[smart-compact] pruned ~130226 tokens across 213 tool results; summarized 0 turns; 13 cached omissions; memo-saved ~0 tokens; last run 1ms; tokenizer off.
+[smart-compact] version 0.2.1; pruned ~130226 tokens across 213 tool results; summarized 0 turns (fallbacks: 0); 13 cached omissions; last run 1ms; measurement heuristic; window 1000000 (opencode-go/model — configured).
 ```
 
-Reading it: `prunedParts` counts tool results that were replaced, `cached omissions` is how many originals `read_omitted_content` can still return, `summarizedTurns` stays 0 unless a compaction with `mode: "compact"` ran, and `memo-saved` counts tokens never remeasured on repeat passes.
+Reading it: `prunedParts` counts tool results that were replaced, `cached omissions` is how many omission records are retained under the store cap (500 files / 8 MiB per session) — an evicted original is still listed here until its mapping is rewritten, but reading it fails closed with the `missing original` notice rather than returning stale text — `summarizedTurns` stays 0 unless a compaction with `mode: "compact"` ran, `fallbacks` counts summaries that degraded to the heuristic, `measurement` names the path that produced the token numbers (`tokenizer` or `heuristic`), and `version` proves which plugin code produced the figures. `— configured` means the window came from `awareness.contextWindowTokens`, not the model registry.
 
 ## 3. Rules for you
 
 1. Never ask Manager to run slash commands in autopilot/auto mode. Call `compact_context` yourself and chain next turn.
 2. Never re-run source tool for pruned output to save tokens — retrieve with `read_omitted_content` by Content ID, else re-run source once if cache miss.
-3. `compact_context` never fails session on over-budget — over-budget still compacts with warning. Budget 0 disables warning.
+3. `compact_context` never fails session on over-budget — over-budget still compacts with warning. The budget follows the model window (`emergencyBudgetRatio`, default 0.6); an explicit `emergencyBudgetTokens` pins it, and a zero ratio or an unknown window disables the warning.
 4. Config: `.opencode/smart-compact.jsonc` (project) overrides `~/.config/opencode/smart-compact.jsonc` (global) overrides defaults. If the global file is missing, create it with the recommended content below. An outside reader or installer LLM follows the same step: create the global file verbatim, then continue.
 ```jsonc
 // Recommended global config. Create `~/.config/opencode/smart-compact.jsonc` with this if missing.
@@ -127,11 +127,16 @@ Reading it: `prunedParts` counts tool results that were replaced, `cached omissi
     "purgeErrors": { "enabled": true, "turns": 4, "protectedTools": ["question"] },
     "stripReasoning": { "enabled": true, "thresholdChars": 500 }
   },
-  "tokens": { "enabled": true, "emergencyBudgetTokens": 50000 },
-  "awareness": { "enabled": true, "warnRatio": 0.7, "emergencyRatio": 0.9, "rearmStep": 0.05, "autoTrimRatio": 0 }
+  "tokens": { "enabled": true, "emergencyBudgetTokens": 0, "emergencyBudgetRatio": 0.6 },
+  "awareness": {
+    "enabled": true, "warnRatio": 0.5, "emergencyRatio": 0.8, "rearmStep": 0.05,
+    "autoTrimRatio": 0.55, "contextWindowTokens": 0
+  }
 }
 ```
 5. Human tools are out of scope. Only the three tools above are agent-callable. Ignore file-system, shell, or Manager UI tools.
+
+`autoTrimRatio: 0.55` is armed by default: a long session trims its own tool output without a `compact_context` call. `contextWindowTokens` is only needed for providers whose model registry entry lacks `limit.context`.
 
 ## 4. Minimal decision flow
 

@@ -4,6 +4,7 @@ import {
   countTokens,
   estimateTokensFallback,
   isTokenizerAvailable,
+  measurementPath,
 } from "../src/tokens.js";
 
 test("estimateTokensFallback returns 0 for empty and ceil(len/4) otherwise", () => {
@@ -15,6 +16,13 @@ test("estimateTokensFallback returns 0 for empty and ceil(len/4) otherwise", () 
 test("countTokens honors the disabled flag and uses the fallback", () => {
   assert.equal(countTokens("abcdefgh", false), 2);
   assert.equal(countTokens("", false), 0);
+});
+
+test("measurementPath names the path that actually produced the numbers", () => {
+  // Disabled measurement always reports the heuristic, even if a tokenizer is
+  // installed; enabled measurement reports tokenizer only when it loaded.
+  assert.equal(measurementPath(false), "heuristic");
+  assert.equal(measurementPath(true), isTokenizerAvailable() ? "tokenizer" : "heuristic");
 });
 
 test("countTokens falls back when no tokenizer is available", () => {

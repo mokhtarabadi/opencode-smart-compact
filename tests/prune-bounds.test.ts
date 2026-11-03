@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_CONFIG, type SmartCompactConfig } from "../src/config.js";
 import { pruneToolResults } from "../src/prune.js";
 import { selectTurns, type Turn } from "../src/plan.js";
 import { emptyState, type Msg } from "../src/types.js";
+
+// Omission originals live on disk; keep every test inside a temp directory.
+process.env.SMART_COMPACT_DATA_DIR = mkdtempSync(join(tmpdir(), "smart-compact-bounds-data-"));
 
 function withPruning(patch: Partial<SmartCompactConfig["pruning"]>): SmartCompactConfig {
   return { ...DEFAULT_CONFIG, pruning: { ...DEFAULT_CONFIG.pruning, ...patch } };
@@ -55,9 +61,12 @@ test("truncate cap prunes over-long results with the full original cached", () =
     },
   ];
   const state = emptyState();
-  const result = pruneToolResults(messages, state, config);
+  const result = pruneToolResults(messages, state, config, "ses-bounds");
   assert.equal(result.pruned, 1);
-  assert.equal(state.omissions["omitted-0001"]!.content, content);
+  // The full original is cached in the per-session file, never in the state blob.
+  const record = state.omissions["omitted-0001"]!;
+  assert.equal(record.content, undefined);
+  assert.equal(readFileSync(record.path!, "utf8"), content);
 });
 
 test("token-measured decisions prune by token budget when enabled", () => {

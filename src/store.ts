@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode/plugin";
 import type { Schema } from "effect";
-import { emptyState, type SessionState } from "./types.js";
+import { migrateLegacyOmissions } from "./omissions.js";
+import { emptyState, type OmissionRecord, type SessionState, type SessionStats } from "./types.js";
 
 /** The plugin context handed to `setup`. */
 export type Ctx = Plugin.Context;
@@ -30,12 +31,30 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
   const raw = await ctx.storage.get(key(sessionID));
   if (!raw || typeof raw !== "object") return emptyState();
   const value = raw as Partial<SessionState>;
-  const omissions = value.omissions ?? {};
+  // Clone the omission map so migration can rewrite records without mutating
+  // the object still held by storage.
+  const omissions = { ...(value.omissions ?? {}) } as Record<string, OmissionRecord>;
+  // Legacy blobs carried the full original inline. Move it to the bounded file
+  // store once; the write is best-effort and a failure keeps the text inline.
+  const migrated = migrateLegacyOmissions(sessionID, omissions);
   const nextOmissionId =
     typeof value.nextOmissionId === "number" && value.nextOmissionId > 0
       ? value.nextOmissionId
       : deriveNextOmissionId(omissions);
-  return {
+  // Older stats carried `savedTokens` (the removed prune memo) and a boolean
+  // `tokenizerUsed`. Only the measurement path survives, mapped from the flag
+  // so an existing session still reports which code produced its numbers.
+  const legacyStats = (value.stats ?? {}) as SessionStats & {
+    savedTokens?: number;
+    tokenizerUsed?: boolean;
+  };
+  const measurementPath =
+    value.stats?.measurementPath === "tokenizer" || value.stats?.measurementPath === "heuristic"
+      ? value.stats.measurementPath
+      : legacyStats.tokenizerUsed === true
+        ? "tokenizer"
+        : undefined;
+  const state: SessionState = {
     summaries: value.summaries ?? {},
     omissions,
     omittedCalls: value.omittedCalls ?? {},
@@ -43,13 +62,16 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       prunedTokens: value.stats?.prunedTokens ?? 0,
       summarizedTurns: value.stats?.summarizedTurns ?? 0,
       prunedParts: value.stats?.prunedParts ?? 0,
-      savedTokens: value.stats?.savedTokens ?? 0,
+      summaryFallbacks:
+        typeof value.stats?.summaryFallbacks === "number" &&
+        Number.isFinite(value.stats.summaryFallbacks)
+          ? value.stats.summaryFallbacks
+          : 0,
       lastRun: value.stats?.lastRun,
       lastRunMs: value.stats?.lastRunMs,
-      tokenizerUsed: value.stats?.tokenizerUsed,
+      measurementPath,
     },
     nextOmissionId,
-    pruneMemo: value.pruneMemo ?? {},
     pending: value.pending ?? null,
     // The awareness latch survives a restart: without it a restarted session
     // would re-warn on the very first request.
@@ -76,11 +98,29 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       value.awarenessWindow > 0
         ? Math.floor(value.awarenessWindow)
         : undefined,
+    awarenessWindowSource:
+      value.awarenessWindowSource === "registry" || value.awarenessWindowSource === "config"
+        ? value.awarenessWindowSource
+        : undefined,
     awarenessModel:
       typeof value.awarenessModel === "string" && value.awarenessModel.length > 0
         ? value.awarenessModel
         : undefined,
   };
+  // Persist the migrated shape so the inline originals stop being rewritten on
+  // every save. Best-effort: a failed save leaves the migration to the next
+  // load, and the inline text still serves retrievals in the meantime.
+  if (migrated) {
+    try {
+      await saveState(ctx, sessionID, state);
+    } catch (error) {
+      console.warn(
+        `[smart-compact] could not persist the migrated omission store for ${sessionID}: ` +
+          `${(error as Error)?.message ?? error}`,
+      );
+    }
+  }
+  return state;
 }
 
 /** Persist the session state. */

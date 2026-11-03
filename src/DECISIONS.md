@@ -26,7 +26,7 @@ The agent is told how full the context window is and how to reclaim room, but th
 
 ## D7 Auto-trim is the only automatic action (2026-10-22)
 
-Context pressure alone may now trigger one action: at `awareness.autoTrimRatio` the hook queues `pending = { mode: "trim", keepTurns: 0 }` for the next request, reusing the same prune pass a manual trim uses. Trimming is the safe half of compaction - no turn is summarized, no user message is touched, and every pruned original is cached under a Content ID - so running it without asking cannot lose the thread of a task. Summarization stays explicit because it replaces turns with summaries and the agent's own reasoning about which detail matters is the only thing that can decide that safely. A pending compaction is never overwritten, and `0` (the shipped default) keeps the plugin purely advisory, so existing installs see no behavior change until they opt in.
+Context pressure alone may now trigger one action: at `awareness.autoTrimRatio` the hook queues `pending = { mode: "trim", keepTurns: 0 }` for the next request, reusing the same prune pass a manual trim uses. Trimming is the safe half of compaction - no turn is summarized, no user message is touched, and every pruned original is cached under a Content ID - so running it without asking cannot lose the thread of a task. Summarization stays explicit because it replaces turns with summaries and the agent's own reasoning about which detail matters is the only thing that can decide that safely. A pending compaction is never overwritten, and `0` disables the action (superseded by D11: the shipped default is now `0.55`, so a default install does engage).
 
 The alternative considered was detecting the task boundary (Brain task id, first user message of a task) and trimming there. It was rejected: the plugin only sees model-visible messages, a heuristic on message text is fragile, and the pressure signal already correlates with the moment relief is needed. See `src/awareness.ts:shouldAutoTrim` and `src/index.ts:runAwareness`.
 
@@ -45,3 +45,27 @@ Two caveats recorded rather than guarded: the guarantee is a property of the run
 ## D10 Awareness silence is recorded, not just kept (2026-10-28)
 
 A session at high fill produced zero advisories with no clue why: the unknown-model path in `runAwareness` returned before measuring, leaving no trace in state, logs, or stats. The silence policy itself is kept — guessing a denominator would fire wrong ratios — but it is now observable: the resolved window and model persist in session state (`awarenessWindow`, `awarenessModel`, both whitelisted in `loadState`), an unknown model logs one console line per model, and `formatStats` ends with either `window <tokens> (<model>)` or `window unknown (<model> — awareness off)`. Malformed values render "unknown", never throw. See `src/index.ts:runAwareness`, `src/actions.ts:formatStats`.
+
+## D11 Auto-trim ships armed (2026-11-03)
+
+A real long session pruned 1,059,881 tokens and summarized 71 turns, but every reclaim was a manual `compact_context` call: `autoTrimRatio` defaulted to `0`, so the only automatic relief in the plugin never ran. Trimming is lossless by construction (notices plus cached originals, no summary, no user message touched), so the safe operation is now the default: `autoTrimRatio: 0.55`, just above `warnRatio`. The existing hysteresis is unchanged — a sustained period queues one trim and the latch re-arms only on growth or after dropping below the line — so this changes *whether* the plugin engages, not *how often* it can. `0` remains the explicit opt-out. See `src/config.ts:DEFAULT_CONFIG`, `src/awareness.ts:shouldAutoTrim`, and the hook-level default-trim test.
+
+## D12 The emergency budget is a share of the window (2026-11-03)
+
+The old absolute 50,000-token budget was 5 percent of a 1M window, so the warning fired from the first few turns and could never be satisfied, which trains an operator to ignore the channel. The budget now derives from the same resolved window the awareness ratio uses: `emergencyBudgetRatio` (0.6) of `limit.context`, with `emergencyBudgetTokens` as an explicit override. With no known window the warning stays off rather than firing against a guessed denominator; a zero ratio is the explicit opt-out. The predicate remains a warning, never a gate. One window lookup per request feeds both the budget and the reminder, so the two thresholds cannot disagree. See `src/config.ts:resolveEmergencyBudget`, `src/index.ts:resolveWindowForRequest`.
+
+## D13 Configured window fallback, labelled as configured (2026-11-03)
+
+`resolveContextLimit` deliberately refuses to guess when a model entry has no `limit.context`, which left the whole advisory subsystem silently inert for such providers. `awareness.contextWindowTokens` now supplies an explicit fallback; it is used only on a registry miss, and both the reminder and the stats line say the denominator is configured rather than measured. With neither source the advisory still stays silent. `awarenessWindowSource` persists alongside the window so the label survives a restart. See `src/awareness.ts:resolveAwarenessWindow`, `src/index.ts:runAwareness`.
+
+## D14 Omission originals live in a bounded file store (2026-11-03)
+
+Session state used to hold the full text of every pruned result, so 397 omissions meant megabytes rewritten on every save, and a retrieval could re-inflate the context pruning had just relieved. Originals now live one file per omission under the plugin data dir; state keeps only the id-to-path mapping. The store is capped at 500 files / 8 MiB per session and evicts oldest-first, retrieval is capped at 20,000 characters with an explicit notice, and a missing file fails closed with the existing missing-original notice. Legacy inline originals migrate on first load; a failed migration keeps the text inline so nothing is lost. See `src/omissions.ts`, `src/store.ts:loadState`, `src/prune.ts:pruneToolResults`.
+
+## D15 The prune memo was removed, not rekeyed (2026-11-03)
+
+`measureMemoized` keyed its cache by `callId`, but a call id identifies one immutable invocation and the prune loop already skips call ids in `state.omittedCalls`; a hit required measuring the same unpruned call twice, a band narrow enough that a real session reported about zero saved tokens. Rekeying by content hash would still pay a hash plus an entry per call for a near-zero hit rate, so the field, the helpers, and the `memo-saved` stat are gone. Legacy state drops `pruneMemo` and `savedTokens` on load. See `src/prune.ts`, `src/store.ts`, `src/actions.ts:formatStats`.
+
+## D16 Stats prove which code and which measurement produced them (2026-11-03)
+
+A review could not tell whether a session ran repository HEAD or the local working tree, nor whether its token figures came from the tokenizer or the heuristic estimate. `compact_stats` now starts with the package version and reports the measurement path used by the last run; it also reports heuristic summary fallbacks, turning a silent quality cliff (a batch whose `<summary>` blocks all missed) into a diagnosable number. No tokenizer dependency was added: the path is reported, not changed by default. See `src/version.ts`, `src/tokens.ts:measurementPath`, `src/summarize.ts:summarizeTurns`.

@@ -99,6 +99,41 @@ export function resolveContextLimit(
   return Math.floor(limit);
 }
 
+/** Where the denominator of the pressure ratio came from. */
+export type WindowSource = "registry" | "config";
+
+/** A resolved denominator for the pressure ratio. */
+export interface ResolvedWindow {
+  /** Effective window in tokens, or absent when neither source exists. */
+  limitTokens?: number;
+  /** `registry` when `limit.context` supplied it, `config` for the fallback. */
+  source?: WindowSource;
+}
+
+/**
+ * Resolve the window a session is measured against: the model registry first,
+ * then the configured `awareness.contextWindowTokens` fallback. The fallback is
+ * used only when the registry entry is missing or carries no usable limit, so
+ * a provider that omits `limit.context` still gets a pressure ratio — and the
+ * reminder can say the denominator is configured rather than measured.
+ */
+export function resolveAwarenessWindow(
+  modelRef: { providerID: string; id: string },
+  models: ReadonlyArray<AwarenessModel>,
+  configuredTokens?: number,
+): ResolvedWindow {
+  const registry = resolveContextLimit(modelRef, models);
+  if (registry !== undefined) return { limitTokens: registry, source: "registry" };
+  if (
+    typeof configuredTokens === "number" &&
+    Number.isFinite(configuredTokens) &&
+    configuredTokens > 0
+  ) {
+    return { limitTokens: Math.floor(configuredTokens), source: "config" };
+  }
+  return {};
+}
+
 /**
  * The pressure level for a fill ratio. `emergency` wins over `warn`; a ratio
  * below the warn threshold is `none` and produces no reminder.
@@ -200,8 +235,10 @@ export function buildAwarenessMessage(args: {
   limitTokens: number;
   ratioPct: number;
   level: AwarenessWarnLevel;
+  /** How the denominator was obtained; `config` is called out explicitly. */
+  windowSource?: WindowSource;
 }): string {
-  const { usedTokens, limitTokens, ratioPct, level } = args;
+  const { usedTokens, limitTokens, ratioPct, level, windowSource } = args;
   const isEmergency = level === "emergency";
   const status = isEmergency
     ? "emergency context pressure - immediate action required"
@@ -209,11 +246,15 @@ export function buildAwarenessMessage(args: {
   const firstLine = isEmergency
     ? "COMPACT NOW — search your tool list for `compact_context` and call it immediately."
     : "ACT NOW — search your tool list for `compact_context` and call it before continuing.";
+  const configuredNote =
+    windowSource === "config"
+      ? `\nDenominator note: the model registry carries no \`limit.context\` for this model, so ${limitTokens} is the configured \`awareness.contextWindowTokens\` value. Treat the percentage as approximate.\n`
+      : "";
   const lines: string[] = [
     firstLine,
     "",
     `[smart-compact] CONTEXT PRESSURE - ${ratioPct}% of the context window is in use (about ${usedTokens} of ${limitTokens} measured tokens).`,
-    "",
+    ...(configuredNote ? [configuredNote] : []),
     `Status: ${status}. The measured fill is a lower bound: it counts only the model-visible messages, while provider system prompts and tool schemas are invisible to the plugin, so the true usage is higher than this number.`,
     "",
     "If you ignore this and the session overflows, in-flight work is dropped and cannot be recovered. Do not let sessions or turns silently overflow.",

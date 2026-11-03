@@ -19,7 +19,13 @@ export interface Msg {
   content: Part[];
 }
 
-/** The cached original of a pruned tool result, retrievable by id. */
+/**
+ * The cached original of a pruned tool result, retrievable by id.
+ *
+ * The original text lives in a per-session file under the bounded omission
+ * store, never in the state blob: state only carries the id-to-path mapping,
+ * so a session save stays small no matter how much history was pruned.
+ */
 export interface OmissionRecord {
   /** Stable id used by `read_omitted_content` (e.g. `omitted-0001`). */
   id: string;
@@ -27,32 +33,33 @@ export interface OmissionRecord {
   callId: string;
   /** Tool name, for the notice text. */
   name?: string;
-  /** The original serialized result value. */
-  content: string;
   /** Estimated tokens saved by pruning. */
   tokens: number;
+  /** Absolute path to the file that holds the original serialized result. */
+  path?: string;
+  /**
+   * Legacy inline original from an older state blob. `loadState` migrates it
+   * to `path`; it survives only when the file write failed, so a retrieval can
+   * still fail over to the text instead of losing it.
+   */
+  content?: string;
 }
+
+/** Which measurement path produced the token numbers. */
+export type MeasurementPath = "tokenizer" | "heuristic";
 
 /** Cumulative savings for one session. */
 export interface SessionStats {
   prunedTokens: number;
   summarizedTurns: number;
   prunedParts: number;
-  /** Context tokens saved on prune passes that reused a memoized measurement. */
-  savedTokens: number;
+  /** Heuristic summary fallbacks across all summarization runs. */
+  summaryFallbacks: number;
   lastRun?: number;
   /** Wall-clock cost of the most recent prune pass, in milliseconds. */
   lastRunMs?: number;
-  /** Whether a real tokenizer (not the fallback) backed the last run. */
-  tokenizerUsed?: boolean;
-}
-
-/** Memoized token measurement for one tool call, keyed by content hash. */
-export interface MemoEntry {
-  /** Hash of the measured content; a content change invalidates the entry. */
-  hash: string;
-  /** Measured token cost reused on a hash hit. */
-  tokens: number;
+  /** Token measurement path used by the most recent run. */
+  measurementPath?: MeasurementPath;
 }
 
 /** Per-session compaction state, persisted in plugin storage. */
@@ -71,11 +78,6 @@ export interface SessionState {
   stats: SessionStats;
   /** Monotonic counter for the next omission id. */
   nextOmissionId: number;
-  /**
-   * Call id → memoized token measurement. Lets repeat passes over identical
-   * content skip remeasuring; any content change invalidates the entry.
-   */
-  pruneMemo: Record<string, MemoEntry>;
   /** A pending command request, consumed by the next context hook. */
   pending?: { mode: "compact" | "trim"; keepTurns: number } | null;
   /**
@@ -93,11 +95,18 @@ export interface SessionState {
   autoTrimLastRatio?: number;
   /**
    * Resolved context window in tokens from the last awareness pass. Absent
-   * when the session model is unknown to the registry or carries no usable
-   * limit — in which case no ratio can be computed and the advisory stays
-   * silent. Surfaced in `compact_stats` so silence is diagnosable.
+   * when the session model is unknown to the registry, no configured fallback
+   * exists, and the entry carries no usable limit — in which case no ratio can
+   * be computed and the advisory stays silent. Surfaced in `compact_stats` so
+   * silence is diagnosable.
    */
   awarenessWindow?: number;
+  /**
+   * Where `awarenessWindow` came from: the model registry or the configured
+   * `awareness.contextWindowTokens` fallback. Lets the reminder and the stats
+   * line say the denominator is configured rather than measured.
+   */
+  awarenessWindowSource?: "registry" | "config";
   /**
    * "providerID/id" of the model seen on the last awareness pass. Recorded
    * even when the window is unknown, so the stats line can name the model
@@ -111,9 +120,8 @@ export function emptyState(): SessionState {
     summaries: {},
     omissions: {},
     omittedCalls: {},
-    stats: { prunedTokens: 0, summarizedTurns: 0, prunedParts: 0, savedTokens: 0 },
+    stats: { prunedTokens: 0, summarizedTurns: 0, prunedParts: 0, summaryFallbacks: 0 },
     nextOmissionId: 1,
-    pruneMemo: {},
     pending: null,
   };
 }

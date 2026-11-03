@@ -88,6 +88,14 @@ function batchPrompt(chunk: PendingTurn[]): string {
   return parts.join("\n");
 }
 
+/** Outcome of one summarization run. */
+export interface SummarizeResult {
+  /** Turns given a summary (including absorbed empty turns). */
+  summarized: number;
+  /** Turns that fell back to the 400-character heuristic. */
+  fallbacks: number;
+}
+
 /**
  * Summarize the eligible turns and store the result by assistant message id.
  * Turns are batched into as few `ctx.generate.text` calls as possible (one per
@@ -96,10 +104,17 @@ function batchPrompt(chunk: PendingTurn[]): string {
  * marked "absorbed" (empty string) so their prose is stripped without a
  * duplicate summary. Turns with no prose, reasoning, or tool markers are
  * absorbed without a model call. A failed or incomplete reply falls back to a
- * heuristic so compaction never fails.
+ * heuristic so compaction never fails; every fallback is counted, because a
+ * whole batch degrading to truncated prose must be visible in `compact_stats`
+ * instead of looking like a normal compaction.
  */
-export async function summarizeTurns(ctx: Ctx, turns: Turn[], state: SessionState): Promise<number> {
+export async function summarizeTurns(
+  ctx: Ctx,
+  turns: Turn[],
+  state: SessionState,
+): Promise<SummarizeResult> {
   let done = 0;
+  let fallbacks = 0;
   const pending: PendingTurn[] = [];
 
   for (const turn of turns) {
@@ -124,7 +139,9 @@ export async function summarizeTurns(ctx: Ctx, turns: Turn[], state: SessionStat
       parsed = new Map();
     }
     for (const item of chunk) {
-      state.summaries[item.firstId] = parsed.get(item.firstId) ?? heuristicSummary(item.body);
+      const parsedSummary = parsed.get(item.firstId);
+      if (parsedSummary === undefined) fallbacks += 1;
+      state.summaries[item.firstId] = parsedSummary ?? heuristicSummary(item.body);
       const assistants = item.turn.assistants;
       for (let i = 1; i < assistants.length; i += 1) {
         state.summaries[assistants[i]!.id] = "";
@@ -132,5 +149,5 @@ export async function summarizeTurns(ctx: Ctx, turns: Turn[], state: SessionStat
       done += 1;
     }
   }
-  return done;
+  return { summarized: done, fallbacks };
 }

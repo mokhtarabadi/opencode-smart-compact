@@ -1,8 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PRUNE_WEIGHTS } from "../src/config.js";
 import { pruneToolResults, rankPruneCandidates, type PruneCandidate } from "../src/prune.js";
 import { emptyState, type Msg } from "../src/types.js";
+
+// Omission originals live on disk; keep every test inside a temp directory.
+process.env.SMART_COMPACT_DATA_DIR = mkdtempSync(join(tmpdir(), "smart-compact-order-data-"));
 
 test("prune weights keep fixed order tool-result first", () => {
   assert.ok(PRUNE_WEIGHTS["tool-result"] > PRUNE_WEIGHTS.summary);

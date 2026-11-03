@@ -34,8 +34,14 @@ export interface StrategiesConfig {
 export interface TokensConfig {
   /** Enable measured counting; false keeps the dependency-free fallback. */
   enabled: boolean;
-  /** Abort a compaction run above this measured cost. 0 disables the guard. */
+  /**
+   * Explicit absolute emergency budget in tokens. `0` (the default) derives
+   * the budget from the resolved context window instead, so the warning scales
+   * with the model rather than firing forever on a large window.
+   */
   emergencyBudgetTokens: number;
+  /** Fraction of the resolved window used when the budget is derived. */
+  emergencyBudgetRatio: number;
 }
 
 /**
@@ -59,6 +65,12 @@ export interface AwarenessConfig {
    * cost is a cache round-trip through `read_omitted_content`.
    */
   autoTrimRatio: number;
+  /**
+   * Fallback context window in tokens, used only when the model registry entry
+   * carries no usable `limit.context`. `0` (the default) keeps awareness
+   * silent for such a model instead of guessing a denominator.
+   */
+  contextWindowTokens: number;
 }
 
 export interface SmartCompactConfig {
@@ -68,6 +80,9 @@ export interface SmartCompactConfig {
   tokens: TokensConfig;
   awareness: AwarenessConfig;
 }
+
+/** Default share of the resolved window used as the emergency budget. */
+export const DEFAULT_EMERGENCY_BUDGET_RATIO = 0.6;
 
 export const DEFAULT_CONFIG: SmartCompactConfig = {
   enabled: true,
@@ -80,7 +95,8 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     alwaysPruneTools: ["read"],
     discardTools: {
       todowrite: "Successfully updated todos.",
-      skill: "Skill contents omitted after compaction; recall the skill if needed.",
+      skill:
+        "Skill contents omitted after compaction; recall the skill if needed.",
     },
     preserveRecentTurns: 2,
     truncateToolsChars: 1024,
@@ -91,8 +107,19 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     purgeErrors: { enabled: true, turns: 4, protectedTools: ["question"] },
     stripReasoning: { enabled: true, thresholdChars: 500 },
   },
-  tokens: { enabled: false, emergencyBudgetTokens: 50000 },
-  awareness: { enabled: true, warnRatio: 0.5, emergencyRatio: 0.8, rearmStep: 0.05, autoTrimRatio: 0 },
+  tokens: {
+    enabled: false,
+    emergencyBudgetTokens: 0,
+    emergencyBudgetRatio: DEFAULT_EMERGENCY_BUDGET_RATIO,
+  },
+  awareness: {
+    enabled: true,
+    warnRatio: 0.5,
+    emergencyRatio: 0.8,
+    rearmStep: 0.05,
+    autoTrimRatio: 0.55,
+    contextWindowTokens: 0,
+  },
 };
 
 /** Strip JSONC comments and trailing commas. Best-effort; never throws. */
@@ -121,7 +148,8 @@ function stripJsonc(text: string): string {
     }
     if (ch === "/" && next === "*") {
       i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/"))
+        i += 1;
       i += 1;
       continue;
     }
@@ -138,12 +166,37 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 /** A fill ratio must be a finite number strictly inside (0, 1). */
 function isValidRatio(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1;
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 1
+  );
 }
 
 /** A re-arm step must be a finite number strictly inside (0, 0.5). */
 function isValidRearmStep(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 0.5;
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 0.5
+  );
+}
+
+/** A derived-budget fraction must be finite and inside (0, 1]; 0 disables. */
+function isValidBudgetRatio(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1
+  );
+}
+
+/** A configured fallback window must be a positive whole number of tokens. */
+function isValidWindowTokens(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 /**
@@ -152,15 +205,23 @@ function isValidRearmStep(value: unknown): value is number {
  * escalation unreachable, so both fall back to the base values together.
  * Sibling keys survive a partial update.
  */
-function mergeAwareness(base: AwarenessConfig, patch: unknown): AwarenessConfig {
+function mergeAwareness(
+  base: AwarenessConfig,
+  patch: unknown,
+): AwarenessConfig {
   const record = asRecord(patch);
   if (!record) return base;
-  const enabled = typeof record.enabled === "boolean" ? record.enabled : base.enabled;
-  const warnRatio = isValidRatio(record.warnRatio) ? record.warnRatio : base.warnRatio;
+  const enabled =
+    typeof record.enabled === "boolean" ? record.enabled : base.enabled;
+  const warnRatio = isValidRatio(record.warnRatio)
+    ? record.warnRatio
+    : base.warnRatio;
   const emergencyRatio = isValidRatio(record.emergencyRatio)
     ? record.emergencyRatio
     : base.emergencyRatio;
-  const rearmStep = isValidRearmStep(record.rearmStep) ? record.rearmStep : base.rearmStep;
+  const rearmStep = isValidRearmStep(record.rearmStep)
+    ? record.rearmStep
+    : base.rearmStep;
   // 0 is a valid value here: it means "never auto-trim", the shipped default.
   const autoTrimRatio =
     record.autoTrimRatio === 0
@@ -168,6 +229,13 @@ function mergeAwareness(base: AwarenessConfig, patch: unknown): AwarenessConfig 
       : isValidRatio(record.autoTrimRatio)
         ? record.autoTrimRatio
         : base.autoTrimRatio;
+  // 0 means "no configured denominator"; a positive integer is accepted.
+  const contextWindowTokens =
+    record.contextWindowTokens === 0
+      ? 0
+      : isValidWindowTokens(record.contextWindowTokens)
+        ? record.contextWindowTokens
+        : base.contextWindowTokens;
   // Ordering guard: the warn threshold must stay below the emergency one.
   if (warnRatio >= emergencyRatio) {
     return {
@@ -176,12 +244,23 @@ function mergeAwareness(base: AwarenessConfig, patch: unknown): AwarenessConfig 
       emergencyRatio: base.emergencyRatio,
       rearmStep,
       autoTrimRatio,
+      contextWindowTokens,
     };
   }
-  return { enabled, warnRatio, emergencyRatio, rearmStep, autoTrimRatio };
+  return {
+    enabled,
+    warnRatio,
+    emergencyRatio,
+    rearmStep,
+    autoTrimRatio,
+    contextWindowTokens,
+  };
 }
 
-function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConfig {
+function mergeConfig(
+  base: SmartCompactConfig,
+  patch: unknown,
+): SmartCompactConfig {
   const p = asRecord(patch);
   if (!p) return base;
   const pruning = asRecord(p.pruning);
@@ -193,17 +272,33 @@ function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConf
   return {
     enabled: typeof p.enabled === "boolean" ? p.enabled : base.enabled,
     pruning: {
-      maxChars: typeof pruning?.maxChars === "number" ? pruning.maxChars : base.pruning.maxChars,
-      maxWords: typeof pruning?.maxWords === "number" ? pruning.maxWords : base.pruning.maxWords,
-      taskMaxChars: typeof pruning?.taskMaxChars === "number" ? pruning.taskMaxChars : base.pruning.taskMaxChars,
-      taskMaxWords: typeof pruning?.taskMaxWords === "number" ? pruning.taskMaxWords : base.pruning.taskMaxWords,
+      maxChars:
+        typeof pruning?.maxChars === "number"
+          ? pruning.maxChars
+          : base.pruning.maxChars,
+      maxWords:
+        typeof pruning?.maxWords === "number"
+          ? pruning.maxWords
+          : base.pruning.maxWords,
+      taskMaxChars:
+        typeof pruning?.taskMaxChars === "number"
+          ? pruning.taskMaxChars
+          : base.pruning.taskMaxChars,
+      taskMaxWords:
+        typeof pruning?.taskMaxWords === "number"
+          ? pruning.taskMaxWords
+          : base.pruning.taskMaxWords,
       protectedTools: Array.isArray(pruning?.protectedTools)
         ? (pruning.protectedTools as string[])
         : base.pruning.protectedTools,
       alwaysPruneTools: Array.isArray(pruning?.alwaysPruneTools)
         ? (pruning.alwaysPruneTools as string[])
         : base.pruning.alwaysPruneTools,
-      discardTools: { ...base.pruning.discardTools, ...(asRecord(pruning?.discardTools) as Record<string, string> | undefined) },
+      discardTools: {
+        ...base.pruning.discardTools,
+        ...(asRecord(pruning?.discardTools) as
+          Record<string, string> | undefined),
+      },
       preserveRecentTurns:
         typeof pruning?.preserveRecentTurns === "number"
           ? pruning.preserveRecentTurns
@@ -212,34 +307,59 @@ function mergeConfig(base: SmartCompactConfig, patch: unknown): SmartCompactConf
         typeof pruning?.truncateToolsChars === "number"
           ? pruning.truncateToolsChars
           : base.pruning.truncateToolsChars,
-      useTokens: typeof pruning?.useTokens === "boolean" ? pruning.useTokens : base.pruning.useTokens,
+      useTokens:
+        typeof pruning?.useTokens === "boolean"
+          ? pruning.useTokens
+          : base.pruning.useTokens,
     },
     strategies: {
       deduplication: {
-        enabled: typeof dedup?.enabled === "boolean" ? dedup.enabled : base.strategies.deduplication.enabled,
+        enabled:
+          typeof dedup?.enabled === "boolean"
+            ? dedup.enabled
+            : base.strategies.deduplication.enabled,
         protectedTools: Array.isArray(dedup?.protectedTools)
           ? (dedup.protectedTools as string[])
           : base.strategies.deduplication.protectedTools,
       },
       purgeErrors: {
-        enabled: typeof purge?.enabled === "boolean" ? purge.enabled : base.strategies.purgeErrors.enabled,
-        turns: typeof purge?.turns === "number" ? purge.turns : base.strategies.purgeErrors.turns,
+        enabled:
+          typeof purge?.enabled === "boolean"
+            ? purge.enabled
+            : base.strategies.purgeErrors.enabled,
+        turns:
+          typeof purge?.turns === "number"
+            ? purge.turns
+            : base.strategies.purgeErrors.turns,
         protectedTools: Array.isArray(purge?.protectedTools)
           ? (purge.protectedTools as string[])
           : base.strategies.purgeErrors.protectedTools,
       },
       stripReasoning: {
-        enabled: typeof strip?.enabled === "boolean" ? strip.enabled : base.strategies.stripReasoning.enabled,
+        enabled:
+          typeof strip?.enabled === "boolean"
+            ? strip.enabled
+            : base.strategies.stripReasoning.enabled,
         thresholdChars:
-          typeof strip?.thresholdChars === "number" ? strip.thresholdChars : base.strategies.stripReasoning.thresholdChars,
+          typeof strip?.thresholdChars === "number"
+            ? strip.thresholdChars
+            : base.strategies.stripReasoning.thresholdChars,
       },
     },
     tokens: {
-      enabled: typeof tokens?.enabled === "boolean" ? tokens.enabled : base.tokens.enabled,
+      enabled:
+        typeof tokens?.enabled === "boolean"
+          ? tokens.enabled
+          : base.tokens.enabled,
       emergencyBudgetTokens:
-        typeof tokens?.emergencyBudgetTokens === "number"
+        typeof tokens?.emergencyBudgetTokens === "number" &&
+        Number.isFinite(tokens.emergencyBudgetTokens) &&
+        tokens.emergencyBudgetTokens >= 0
           ? tokens.emergencyBudgetTokens
           : base.tokens.emergencyBudgetTokens,
+      emergencyBudgetRatio: isValidBudgetRatio(tokens?.emergencyBudgetRatio)
+        ? tokens.emergencyBudgetRatio
+        : base.tokens.emergencyBudgetRatio,
     },
     awareness: mergeAwareness(base.awareness, p.awareness),
   };
@@ -264,12 +384,23 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   "strategies.deduplication": ["enabled", "protectedTools"],
   "strategies.purgeErrors": ["enabled", "turns", "protectedTools"],
   "strategies.stripReasoning": ["enabled", "thresholdChars"],
-  tokens: ["enabled", "emergencyBudgetTokens"],
-  awareness: ["enabled", "warnRatio", "emergencyRatio", "rearmStep", "autoTrimRatio"],
+  tokens: ["enabled", "emergencyBudgetTokens", "emergencyBudgetRatio"],
+  awareness: [
+    "enabled",
+    "warnRatio",
+    "emergencyRatio",
+    "rearmStep",
+    "autoTrimRatio",
+    "contextWindowTokens",
+  ],
 };
 
 /** Collect one warning per unknown key, naming its exact dotted path. */
-function collectUnknown(record: Record<string, unknown>, section: string, out: string[]): void {
+function collectUnknown(
+  record: Record<string, unknown>,
+  section: string,
+  out: string[],
+): void {
   for (const key of Object.keys(record)) {
     const known = KNOWN_KEYS[section] ?? [];
     if (!known.includes(key)) {
@@ -300,11 +431,41 @@ export function validateConfig(raw: unknown): string[] {
     }
   }
   const tokens = asRecord(root.tokens);
-  if (tokens) collectUnknown(tokens, "tokens", warnings);
+  if (tokens) {
+    collectUnknown(tokens, "tokens", warnings);
+    warnings.push(...validateTokens(tokens));
+  }
   const awareness = asRecord(root.awareness);
   if (awareness) {
     collectUnknown(awareness, "awareness", warnings);
     warnings.push(...validateAwareness(awareness));
+  }
+  return warnings;
+}
+
+/**
+ * Range checks for the token section. An explicit budget may be 0 (derive)
+ * or any non-negative number; the derived fraction must be inside (0, 1], or
+ * 0 to disable the window-scaled warning.
+ */
+export function validateTokens(raw: unknown): string[] {
+  const warnings: string[] = [];
+  const record = asRecord(raw);
+  if (!record) return warnings;
+  const budget = record.emergencyBudgetTokens;
+  if (
+    budget !== undefined &&
+    (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0)
+  ) {
+    warnings.push(
+      "Invalid config value: tokens.emergencyBudgetTokens must be 0 (derive from the window) or a positive token count",
+    );
+  }
+  const ratio = record.emergencyBudgetRatio;
+  if (ratio !== undefined && !isValidBudgetRatio(ratio)) {
+    warnings.push(
+      "Invalid config value: tokens.emergencyBudgetRatio must be 0 (disabled) or a number greater than 0 and at most 1",
+    );
   }
   return warnings;
 }
@@ -337,12 +498,30 @@ export function validateAwareness(raw: unknown): string[] {
     );
   }
   const autoTrimRatio = record.autoTrimRatio;
-  if (autoTrimRatio !== undefined && autoTrimRatio !== 0 && !isValidRatio(autoTrimRatio)) {
+  if (
+    autoTrimRatio !== undefined &&
+    autoTrimRatio !== 0 &&
+    !isValidRatio(autoTrimRatio)
+  ) {
     warnings.push(
       "Invalid config value: awareness.autoTrimRatio must be 0 or a number greater than 0 and less than 1",
     );
   }
-  if (isValidRatio(warnRatio) && isValidRatio(emergencyRatio) && warnRatio >= emergencyRatio) {
+  const contextWindowTokens = record.contextWindowTokens;
+  if (
+    contextWindowTokens !== undefined &&
+    contextWindowTokens !== 0 &&
+    !isValidWindowTokens(contextWindowTokens)
+  ) {
+    warnings.push(
+      "Invalid config value: awareness.contextWindowTokens must be 0 or a positive whole number of tokens",
+    );
+  }
+  if (
+    isValidRatio(warnRatio) &&
+    isValidRatio(emergencyRatio) &&
+    warnRatio >= emergencyRatio
+  ) {
     warnings.push(
       "Invalid config value: awareness.warnRatio must be less than awareness.emergencyRatio",
     );
@@ -351,16 +530,89 @@ export function validateAwareness(raw: unknown): string[] {
 }
 
 /**
- * Whether the measured token cost is over the configured emergency budget.
+ * The effective emergency budget in tokens.
+ *
+ * An explicit `tokens.emergencyBudgetTokens` (> 0) always wins, so an operator
+ * can pin an exact number. Otherwise the budget is `emergencyBudgetRatio`
+ * (default 60 percent) of the resolved context window. With no known window the
+ * result is 0, which disables the warning: guessing a denominator is the same
+ * mistake the awareness module already avoids, and an absolute default is what
+ * made the old 50K warning fire forever on a 1M-token model.
+ */
+export function resolveEmergencyBudget(
+  config: SmartCompactConfig,
+  limitTokens?: number,
+): number {
+  const override = config?.tokens?.emergencyBudgetTokens;
+  if (
+    typeof override === "number" &&
+    Number.isFinite(override) &&
+    override > 0
+  ) {
+    return Math.floor(override);
+  }
+  const ratio = config?.tokens?.emergencyBudgetRatio;
+  const safeRatio = isValidBudgetRatio(ratio)
+    ? ratio
+    : DEFAULT_EMERGENCY_BUDGET_RATIO;
+  // A zero fraction is the explicit opt-out for the derived warning.
+  if (safeRatio <= 0) return 0;
+  if (
+    typeof limitTokens !== "number" ||
+    !Number.isFinite(limitTokens) ||
+    limitTokens <= 0
+  ) {
+    return 0;
+  }
+  return Math.floor(limitTokens * safeRatio);
+}
+
+/**
+ * Human-readable provenance for the effective budget, so a warning says where
+ * the number came from instead of repeating an opaque threshold.
+ */
+export function emergencyBudgetDescription(
+  config: SmartCompactConfig,
+  limitTokens?: number,
+): string {
+  const override = config?.tokens?.emergencyBudgetTokens;
+  if (
+    typeof override === "number" &&
+    Number.isFinite(override) &&
+    override > 0
+  ) {
+    return "configured via tokens.emergencyBudgetTokens";
+  }
+  if (
+    typeof limitTokens === "number" &&
+    Number.isFinite(limitTokens) &&
+    limitTokens > 0
+  ) {
+    const ratio = config?.tokens?.emergencyBudgetRatio;
+    const safeRatio = isValidBudgetRatio(ratio)
+      ? ratio
+      : DEFAULT_EMERGENCY_BUDGET_RATIO;
+    return `${Math.round(safeRatio * 100)}% of the ${Math.floor(limitTokens)}-token window`;
+  }
+  return "derived budget disabled (no context window known)";
+}
+
+/**
+ * Whether the measured token cost is over the effective emergency budget.
  *
  * This is a WARNING signal, never a gate: an over-budget history is exactly the
  * history that needs compaction, so refusing to compact it deadlocks the
  * session. Callers warn (and may notify) and then continue the work they were
- * asked to do. A budget of 0 disables the warning explicitly.
+ * asked to do. A budget of 0 (explicit, or because no window is known)
+ * disables the warning.
  */
-export function isOverEmergencyBudget(measuredTokens: number, config: SmartCompactConfig): boolean {
-  const budget = config.tokens.emergencyBudgetTokens;
-  if (typeof budget !== "number" || budget <= 0) return false;
+export function isOverEmergencyBudget(
+  measuredTokens: number,
+  config: SmartCompactConfig,
+  limitTokens?: number,
+): boolean {
+  const budget = resolveEmergencyBudget(config, limitTokens);
+  if (budget <= 0) return false;
   return measuredTokens > budget;
 }
 
@@ -401,12 +653,25 @@ export const PRUNE_WEIGHTS = {
  * Returns ratio clamped 0 to 1 and level by fixed thresholds.
  * Safe divide: non-positive limit yields ratio 0 and normal level.
  */
-export function getBudgetState(usedTokens: number, limitTokens: number): BudgetState {
+export function getBudgetState(
+  usedTokens: number,
+  limitTokens: number,
+): BudgetState {
   // Guard non-finite or non-positive limits first — no budget means no pressure.
-  if (typeof usedTokens !== "number" || !Number.isFinite(usedTokens)) usedTokens = 0;
-  if (typeof limitTokens !== "number" || !Number.isFinite(limitTokens) || limitTokens <= 0) {
+  if (typeof usedTokens !== "number" || !Number.isFinite(usedTokens))
+    usedTokens = 0;
+  if (
+    typeof limitTokens !== "number" ||
+    !Number.isFinite(limitTokens) ||
+    limitTokens <= 0
+  ) {
     // No measurable limit: report empty usage, never warn.
-    return { usedTokens: Math.max(0, usedTokens), limitTokens, ratio: 0, level: "normal" };
+    return {
+      usedTokens: Math.max(0, usedTokens),
+      limitTokens,
+      ratio: 0,
+      level: "normal",
+    };
   }
   // Clamp negative usage to zero, overuse to ratio 1.
   const safeUsed = Math.max(0, usedTokens);
@@ -415,7 +680,11 @@ export function getBudgetState(usedTokens: number, limitTokens: number): BudgetS
   const ratio = raw < 0 ? 0 : raw > 1 ? 1 : raw;
   // Fixed thresholds: emergency wins over warn.
   const level: BudgetLevel =
-    ratio >= BUDGET_EMERGENCY_RATIO ? "emergency" : ratio >= BUDGET_WARN_RATIO ? "warn" : "normal";
+    ratio >= BUDGET_EMERGENCY_RATIO
+      ? "emergency"
+      : ratio >= BUDGET_WARN_RATIO
+        ? "warn"
+        : "normal";
   return { usedTokens: safeUsed, limitTokens, ratio, level };
 }
 
@@ -439,14 +708,18 @@ export async function loadConfig(ctx: Ctx): Promise<SmartCompactConfig> {
   let config = DEFAULT_CONFIG;
   const global = await readConfigFile(globalConfigPath());
   if (global) {
-    for (const warning of validateConfig(global)) console.warn(`[smart-compact] ${warning} (global config)`);
+    for (const warning of validateConfig(global))
+      console.warn(`[smart-compact] ${warning} (global config)`);
     config = mergeConfig(config, global);
   }
   const directory = (ctx.location as { directory?: string }).directory;
   if (directory) {
-    const project = await readConfigFile(join(directory, ".opencode", "smart-compact.jsonc"));
+    const project = await readConfigFile(
+      join(directory, ".opencode", "smart-compact.jsonc"),
+    );
     if (project) {
-      for (const warning of validateConfig(project)) console.warn(`[smart-compact] ${warning} (project config)`);
+      for (const warning of validateConfig(project))
+        console.warn(`[smart-compact] ${warning} (project config)`);
       config = mergeConfig(config, project);
     }
   }

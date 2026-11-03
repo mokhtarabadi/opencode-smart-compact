@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   isOverEmergencyBudget,
+  resolveEmergencyBudget,
   DEFAULT_CONFIG,
   validateConfig,
 } from "../src/config.js";
@@ -31,14 +32,39 @@ test("validateConfig names unknown nested keys with their path", () => {
   assert.ok(warnings.some((w) => w.includes("strategies.stripReasoning.huh")));
 });
 
-test("isOverEmergencyBudget flags an over-budget history as a warning only", () => {
+test("the emergency budget derives from the window so a 1M session can satisfy it", () => {
+  // 60 percent of a 1M window: quiet during normal work, fires near the line.
+  assert.equal(resolveEmergencyBudget(DEFAULT_CONFIG, 1_000_000), 600_000);
+  assert.equal(isOverEmergencyBudget(100_000, DEFAULT_CONFIG, 1_000_000), false);
+  assert.equal(isOverEmergencyBudget(599_999, DEFAULT_CONFIG, 1_000_000), false);
+  assert.equal(isOverEmergencyBudget(700_000, DEFAULT_CONFIG, 1_000_000), true);
   // True means "warn", never "abort": an over-budget history must still compact.
-  assert.equal(isOverEmergencyBudget(60000, DEFAULT_CONFIG), true);
-  assert.equal(isOverEmergencyBudget(100, DEFAULT_CONFIG), false);
-  assert.equal(
-    isOverEmergencyBudget(999999999, { ...DEFAULT_CONFIG, tokens: { enabled: false, emergencyBudgetTokens: 0 } }),
-    false,
-  );
+  assert.equal(isOverEmergencyBudget(600_001, DEFAULT_CONFIG, 1_000_000), true);
+});
+
+test("the emergency budget stays quiet when no window is known", () => {
+  // Guessing a denominator is the mistake the awareness module already avoids,
+  // so an unknown window disables the derived warning instead of firing forever.
+  assert.equal(resolveEmergencyBudget(DEFAULT_CONFIG, undefined), 0);
+  assert.equal(resolveEmergencyBudget(DEFAULT_CONFIG, 0), 0);
+  assert.equal(isOverEmergencyBudget(10_000_000, DEFAULT_CONFIG), false);
+});
+
+test("an explicit emergencyBudgetTokens override wins at any window", () => {
+  const overridden = {
+    ...DEFAULT_CONFIG,
+    tokens: { ...DEFAULT_CONFIG.tokens, emergencyBudgetTokens: 60_000 },
+  };
+  assert.equal(resolveEmergencyBudget(overridden, 1_000_000), 60_000);
+  assert.equal(isOverEmergencyBudget(59_999, overridden, 1_000_000), false);
+  assert.equal(isOverEmergencyBudget(60_001, overridden, 1_000_000), true);
+  // 0 with no ratio and no window is the explicit "disabled" shape.
+  const disabled = { ...DEFAULT_CONFIG, tokens: { ...DEFAULT_CONFIG.tokens, emergencyBudgetTokens: 0 } };
+  assert.equal(isOverEmergencyBudget(999_999_999, disabled), false);
+  // A zero derived fraction is the explicit opt-out for the window-scaled path.
+  const ratioOff = { ...DEFAULT_CONFIG, tokens: { ...DEFAULT_CONFIG.tokens, emergencyBudgetRatio: 0 } };
+  assert.equal(resolveEmergencyBudget(ratioOff, 1_000_000), 0);
+  assert.equal(isOverEmergencyBudget(900_000, ratioOff, 1_000_000), false);
 });
 
 test("loadConfig merges project config and warns on unknown keys", async () => {
@@ -64,15 +90,21 @@ test("loadConfig merges project config and warns on unknown keys", async () => {
   }
 });
 
-test("awareness defaults are on with the approved thresholds", () => {
+test("awareness defaults are on, with auto-trim armed and no configured window", () => {
   assert.deepEqual(DEFAULT_CONFIG.awareness, {
     enabled: true,
     warnRatio: 0.5,
     emergencyRatio: 0.8,
     rearmStep: 0.05,
-    autoTrimRatio: 0,
+    autoTrimRatio: 0.55,
+    contextWindowTokens: 0,
   });
   assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
+});
+
+test("token defaults derive the budget from the window", () => {
+  assert.equal(DEFAULT_CONFIG.tokens.emergencyBudgetTokens, 0);
+  assert.equal(DEFAULT_CONFIG.tokens.emergencyBudgetRatio, 0.6);
 });
 
 test("validateConfig names unknown awareness keys and rejects out-of-range values", () => {
@@ -89,6 +121,26 @@ test("validateConfig names unknown awareness keys and rejects out-of-range value
   assert.deepEqual(validateConfig({ awareness: { autoTrimRatio: 0.5 } }), []);
   const badAutoTrim = validateConfig({ awareness: { autoTrimRatio: 1 } });
   assert.ok(badAutoTrim.some((w) => w.includes("awareness.autoTrimRatio")));
+});
+
+test("validateConfig accepts the fallback window and rejects impossible values", () => {
+  // 0 means "no configured denominator"; a positive integer is a window.
+  assert.deepEqual(validateConfig({ awareness: { contextWindowTokens: 0 } }), []);
+  assert.deepEqual(validateConfig({ awareness: { contextWindowTokens: 200_000 } }), []);
+  const badWindow = validateConfig({ awareness: { contextWindowTokens: -1 } });
+  assert.ok(badWindow.some((w) => w.includes("awareness.contextWindowTokens")));
+  const fractional = validateConfig({ awareness: { contextWindowTokens: 1.5 } });
+  assert.ok(fractional.some((w) => w.includes("awareness.contextWindowTokens")));
+});
+
+test("validateConfig range-checks the window-scaled budget ratio", () => {
+  assert.deepEqual(validateConfig({ tokens: { emergencyBudgetRatio: 0.6 } }), []);
+  // 0 is the explicit "do not derive" opt-out, not an invalid fraction.
+  assert.deepEqual(validateConfig({ tokens: { emergencyBudgetRatio: 0 } }), []);
+  const badRatio = validateConfig({ tokens: { emergencyBudgetRatio: 1.5 } });
+  assert.ok(badRatio.some((w) => w.includes("tokens.emergencyBudgetRatio")));
+  const badBudget = validateConfig({ tokens: { emergencyBudgetTokens: -5 } });
+  assert.ok(badBudget.some((w) => w.includes("tokens.emergencyBudgetTokens")));
 });
 
 test("loadConfig overrides one awareness key and keeps its siblings", async () => {

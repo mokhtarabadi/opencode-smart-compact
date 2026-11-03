@@ -17,16 +17,35 @@ import {
   buildAwarenessMessage,
   getAwarenessLevel,
   measureVisibleTokens,
-  resolveContextLimit,
+  resolveAwarenessWindow,
   shouldAutoTrim,
   shouldFireAwareness,
   type AwarenessModel,
+  type ResolvedWindow,
 } from "./awareness.js";
-import { applyOmissions, measureTokens, pruneToolResults, serializeResult } from "./prune.js";
+import {
+  applyOmissions,
+  measureTokens,
+  missingOmissionNotice,
+  pruneToolResults,
+  serializeResult,
+} from "./prune.js";
+import {
+  MAX_OMISSION_RESPONSE_CHARS,
+  boundOmissionResponse,
+  readOmissionOriginal,
+} from "./omissions.js";
 import { applyStrategies } from "./strategies.js";
-import { getBudgetState, isOverEmergencyBudget, loadConfig, type SmartCompactConfig } from "./config.js";
+import {
+  emergencyBudgetDescription,
+  getBudgetState,
+  isOverEmergencyBudget,
+  loadConfig,
+  resolveEmergencyBudget,
+  type SmartCompactConfig,
+} from "./config.js";
 import { loadState, saveState, writeBackupPointer, type Ctx } from "./store.js";
-import { isTokenizerAvailable } from "./tokens.js";
+import { measurementPath } from "./tokens.js";
 import type { Msg, SessionState } from "./types.js";
 
 const COMPACT = "magic-compact";
@@ -61,6 +80,7 @@ async function runPrune(
   sessionID: string,
   messages: Msg[],
   config: SmartCompactConfig,
+  limitTokens?: number,
 ): Promise<SessionState> {
   const started = Date.now();
   const state = await loadState(ctx, sessionID);
@@ -68,24 +88,28 @@ async function runPrune(
   // prune pass here would remove the only size relief a large session has, so an
   // over-budget context still gets pruned and still gets its warning.
   const measured = measureVisibleCost(messages, config);
+  // The budget is a share of the resolved window (or an explicit override), so
+  // a 1M-token model is not warned from the first few turns. No window means
+  // no derived budget, which disables the warning instead of guessing.
+  const budgetLimit = resolveEmergencyBudget(config, limitTokens);
   // D1 meter: display-only budget ratio before prune, never changes behavior.
   // Guard legacy or partial config/state — fail closed to empty, never throw.
-  const budgetLimit = config?.tokens?.emergencyBudgetTokens ?? 0;
   const beforeMeter = getBudgetState(measured, budgetLimit);
   console.log(`[smart-compact] ${formatBudgetMeter(beforeMeter)} before prune.`);
-  if (isOverEmergencyBudget(measured, config)) {
+  if (isOverEmergencyBudget(measured, config, limitTokens)) {
     const text =
       `[smart-compact] context is over the emergency budget of ` +
-      `${config.tokens.emergencyBudgetTokens} tokens (measured ~${measured}); ` +
-      `pruning anyway. Raise tokens.emergencyBudgetTokens to silence this warning.`;
+      `${budgetLimit} tokens (${emergencyBudgetDescription(config, limitTokens)}; ` +
+      `measured ~${measured}); pruning anyway. Raise tokens.emergencyBudgetTokens ` +
+      `or tokens.emergencyBudgetRatio to silence this warning.`;
     console.warn(text);
     await notify(ctx, sessionID, text);
   }
   const strategies = applyStrategies(messages, config);
-  const pruned = pruneToolResults(messages, state, config);
+  const pruned = pruneToolResults(messages, state, config, sessionID);
   // D1 meter: display-only ratio after prune for observable headroom.
   const afterCost = measureVisibleCost(messages, config);
-  const afterMeter = getBudgetState(afterCost, config?.tokens?.emergencyBudgetTokens ?? 0);
+  const afterMeter = getBudgetState(afterCost, budgetLimit);
   console.log(`[smart-compact] ${formatBudgetMeter(afterMeter)} after prune.`);
   // D3 pointer (post-prune restore source): fresh keys plus after-prune ratio.
   // Best-effort with warn — a pointer failure never blocks prune (V5).
@@ -103,10 +127,9 @@ async function runPrune(
   }
   state.stats.prunedParts += pruned.pruned + strategies.pruned;
   state.stats.prunedTokens += pruned.tokens + strategies.tokens;
-  state.stats.savedTokens += pruned.memoTokens;
   state.stats.lastRun = Date.now();
   state.stats.lastRunMs = Date.now() - started;
-  state.stats.tokenizerUsed = isTokenizerAvailable();
+  state.stats.measurementPath = measurementPath(config.tokens.enabled);
   state.pending = null;
   await saveState(ctx, sessionID, state);
   return state;
@@ -129,6 +152,56 @@ function measureVisibleCost(messages: Msg[], config: SmartCompactConfig): number
   return total;
 }
 
+/** One registry-failure warning per process, so a broken registry is not noise. */
+let warnedRegistryFailure = false;
+
+/** The model registry as a plain list, tolerating both known response shapes. */
+async function listModels(ctx: Ctx): Promise<ReadonlyArray<AwarenessModel>> {
+  const payload = (await ctx.model.list()) as unknown;
+  return Array.isArray(payload)
+    ? (payload as ReadonlyArray<AwarenessModel>)
+    : ((payload as { data?: ReadonlyArray<AwarenessModel> })?.data ?? []);
+}
+
+/**
+ * Resolve the window once per model request: the registry limit first, then
+ * the configured `awareness.contextWindowTokens` fallback. The same result
+ * feeds the emergency budget and the awareness reminder, so the two cannot
+ * use different denominators.
+ */
+async function resolveWindowForRequest(
+  ctx: Ctx,
+  event: unknown,
+  config: SmartCompactConfig,
+): Promise<ResolvedWindow> {
+  try {
+    const modelRef = (event as { model?: unknown }).model as
+      | { providerID: string; id: string }
+      | undefined;
+    if (!modelRef || typeof modelRef.providerID !== "string" || typeof modelRef.id !== "string") {
+      return {};
+    }
+    let models: ReadonlyArray<AwarenessModel> = [];
+    try {
+      models = await listModels(ctx);
+    } catch (error) {
+      // The configured fallback can still provide a denominator, so carry on.
+      if (!warnedRegistryFailure) {
+        warnedRegistryFailure = true;
+        console.warn(
+          `[smart-compact] model registry unavailable: ${(error as Error)?.message ?? error}; ` +
+            `continuing with awareness.contextWindowTokens when configured.`,
+        );
+      }
+    }
+    return resolveAwarenessWindow(modelRef, models, config.awareness.contextWindowTokens);
+  } catch (error) {
+    // Never break the model call over a window lookup.
+    console.warn(`[smart-compact] window resolution failed: ${(error as Error)?.message ?? error}`);
+    return {};
+  }
+}
+
 /**
  * Context-pressure awareness: tell the agent how full the context window is
  * once it crosses the configured ratio, and how to reclaim room.
@@ -145,6 +218,7 @@ async function runAwareness(
   event: unknown,
   messages: Msg[],
   config: SmartCompactConfig,
+  window: ResolvedWindow,
 ): Promise<void> {
   try {
     const awareness = config.awareness;
@@ -155,33 +229,41 @@ async function runAwareness(
       | { providerID: string; id: string }
       | undefined;
     if (!modelRef) return;
-    const payload = (await ctx.model.list()) as unknown;
-    const models: ReadonlyArray<AwarenessModel> = Array.isArray(payload)
-      ? (payload as ReadonlyArray<AwarenessModel>)
-      : ((payload as { data?: ReadonlyArray<AwarenessModel> })?.data ?? []);
-    const limitTokens = resolveContextLimit(modelRef, models);
-    // An unknown model or a missing limit means no usable window size: stay
-    // silent instead of guessing a denominator. Record the model and log once
-    // per model so the silence is diagnosable instead of invisible: without
-    // this, a session can sit at high fill with zero warnings and no clue why.
+    const limitTokens = window.limitTokens;
+    // An unknown model with no configured fallback means no usable window
+    // size: stay silent instead of guessing a denominator. Record the model
+    // and log once per model so the silence is diagnosable instead of
+    // invisible: without this, a session can sit at high fill with zero
+    // warnings and no clue why.
     const modelKey = `${modelRef.providerID}/${modelRef.id}`;
     const state = await loadState(ctx, sessionID);
     if (!limitTokens) {
-      if (state.awarenessModel !== modelKey || state.awarenessWindow !== undefined) {
+      if (
+        state.awarenessModel !== modelKey ||
+        state.awarenessWindow !== undefined ||
+        state.awarenessWindowSource !== undefined
+      ) {
         state.awarenessModel = modelKey;
         state.awarenessWindow = undefined;
+        state.awarenessWindowSource = undefined;
         await saveState(ctx, sessionID, state);
         console.log(
           `[smart-compact] awareness disabled: unknown model ${modelKey} or missing context limit — ` +
             `no pressure ratio can be computed, so no advisory will fire. ` +
-            `Check that the model registry entry carries limit.context.`,
+            `Check that the model registry entry carries limit.context, or set ` +
+            `awareness.contextWindowTokens.`,
         );
       }
       return;
     }
-    if (state.awarenessModel !== modelKey || state.awarenessWindow !== limitTokens) {
+    if (
+      state.awarenessModel !== modelKey ||
+      state.awarenessWindow !== limitTokens ||
+      state.awarenessWindowSource !== window.source
+    ) {
       state.awarenessModel = modelKey;
       state.awarenessWindow = limitTokens;
+      state.awarenessWindowSource = window.source;
       await saveState(ctx, sessionID, state);
     }
     const usedTokens = measureVisibleTokens(messages);
@@ -254,6 +336,7 @@ async function runAwareness(
       limitTokens,
       ratioPct: Math.round(ratio * 100),
       level,
+      windowSource: window.source,
     });
     (system as Array<{ type: string; text: string }>).push({ type: "text", text });
     state.awarenessLastRatio = ratio;
@@ -275,11 +358,13 @@ export default Plugin.define({
         description: "Lossless context compression (optional: number of recent turns to keep)",
         async execute({ sessionID, prompt }) {
           const keepTurns = parseKeepTurns(prompt?.text);
-          const summarized = await compactNow(ctx, sessionID, keepTurns);
+          const result = await compactNow(ctx, sessionID, keepTurns);
+          const fallbackNote =
+            result.fallbacks > 0 ? ` (${result.fallbacks} fell back to heuristic summaries)` : "";
           await notify(
             ctx,
             sessionID,
-            `[smart-compact] summarized ${summarized} turn(s); bulky tool output will be trimmed on the next request.`,
+            `[smart-compact] summarized ${result.summarized} turn(s)${fallbackNote}; bulky tool output will be trimmed on the next request.`,
           );
         },
       });
@@ -313,7 +398,7 @@ export default Plugin.define({
       editor.add({
         name: TOOL,
         description:
-          "Read original tool output omitted by context compaction. Returns the cached, possibly stale original for a Content ID (e.g. omitted-0001). Use only when the original output cannot be reproduced by a new tool call.",
+          `Read original tool output omitted by context compaction. Returns the cached, possibly stale original for a Content ID (e.g. omitted-0001), capped at ${MAX_OMISSION_RESPONSE_CHARS} characters with an explicit truncation notice. Use only when the original output cannot be reproduced by a new tool call.`,
         input: {
           type: "object",
           properties: {
@@ -327,12 +412,19 @@ export default Plugin.define({
           if (!contentId) return { content: "Missing contentId." };
           const state = await loadState(ctx, context.sessionID);
           const record = state.omissions[contentId];
-          return {
-            content:
-              record?.content ??
-              `No omitted content found for Content ID: ${contentId} in this session. ` +
+          if (!record) {
+            return {
+              content:
+                `No omitted content found for Content ID: ${contentId} in this session. ` +
                 `It was cleared by a newer compaction — rerun the tool to reproduce the output instead of trusting a restore.`,
-          };
+            };
+          }
+          const original = readOmissionOriginal(record);
+          // Fail closed: a mapped record without a readable original (evicted
+          // file, or a cache cleared by a newer compaction) names the missing
+          // id instead of restoring a phantom.
+          if (original === undefined) return { content: missingOmissionNotice(contentId) };
+          return { content: boundOmissionResponse(contentId, original) };
         },
       });
 
@@ -370,9 +462,11 @@ export default Plugin.define({
             await scheduleTrim(ctx, context.sessionID, args.keepTurns);
             return { content: "[smart-compact] tool output will be trimmed on the next request." };
           }
-          const summarized = await compactNow(ctx, context.sessionID, args.keepTurns);
+          const result = await compactNow(ctx, context.sessionID, args.keepTurns);
+          const fallbackNote =
+            result.fallbacks > 0 ? ` (${result.fallbacks} fell back to heuristic summaries)` : "";
           return {
-            content: `[smart-compact] summarized ${summarized} turn(s); bulky tool output will be trimmed on the next request.`,
+            content: `[smart-compact] summarized ${result.summarized} turn(s)${fallbackNote}; bulky tool output will be trimmed on the next request.`,
           };
         },
       });
@@ -383,7 +477,7 @@ export default Plugin.define({
       editor.add({
         name: STATS_TOOL,
         description:
-          "Report this session's cumulative compaction savings: tokens pruned, tool results trimmed, turns summarized, cached omissions, memo-saved tokens, last run time and whether the tokenizer backed the run. Read-only, no inputs, safe to call at any time.",
+          "Report this session's cumulative compaction savings: plugin version, tokens pruned, tool results trimmed, turns summarized with heuristic fallbacks, cached omissions, last run time, which measurement path produced the numbers (tokenizer or heuristic) and the resolved context window. Read-only, no inputs, safe to call at any time.",
         input: {
           type: "object",
           properties: {},
@@ -412,10 +506,13 @@ export default Plugin.define({
       const config = await loadConfig(ctx);
       if (!config.enabled) return;
 
+      // One window lookup per request feeds both the emergency budget and the
+      // awareness ratio, so the two thresholds can never disagree.
+      const window = await resolveWindowForRequest(ctx, event, config);
       const state = await loadState(ctx, sessionID);
       if (state.pending) {
         try {
-          await runPrune(ctx, sessionID, messages, config);
+          await runPrune(ctx, sessionID, messages, config, window.limitTokens);
         } catch (error) {
           console.warn(`[smart-compact] runPrune failed for ${sessionID}: ${(error as Error)?.message ?? error}`);
         }
@@ -424,7 +521,7 @@ export default Plugin.define({
       applySummaries(messages, fresh);
       applyOmissions(messages, fresh, config);
       // Awareness runs last so it measures exactly what the model receives.
-      await runAwareness(ctx, sessionID, event, messages, config);
+      await runAwareness(ctx, sessionID, event, messages, config, window);
     });
     } catch (error) {
       console.warn(`[smart-compact] ctx.session.hook failed: ${(error as Error)?.message ?? error}`);

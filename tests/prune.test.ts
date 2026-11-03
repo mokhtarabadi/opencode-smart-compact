@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   applyOmissions,
   pruneToolResults,
@@ -7,6 +10,9 @@ import {
 } from "../src/prune.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { emptyState, type Msg } from "../src/types.js";
+
+// Omission originals live on disk; keep every test inside a temp directory.
+process.env.SMART_COMPACT_DATA_DIR = mkdtempSync(join(tmpdir(), "smart-compact-prune-data-"));
 
 test("shouldPrune applies per-tool rules", () => {
   assert.equal(shouldPrune("read", "short"), true);
@@ -43,10 +49,12 @@ test("pruneToolResults allocates monotonic ids and caches originals", () => {
       ],
     },
   ];
-  const first = pruneToolResults(messages, state);
+  const first = pruneToolResults(messages, state, DEFAULT_CONFIG, "ses-prune-ids");
   assert.equal(first.pruned, 1);
-  assert.ok(state.omissions["omitted-0001"]);
-  assert.equal(state.omissions["omitted-0001"]!.content, "original file text");
+  const record = state.omissions["omitted-0001"]!;
+  assert.equal(record.content, undefined);
+  assert.equal(typeof record.path, "string");
+  assert.equal(readFileSync(record.path!, "utf8"), "original file text");
   assert.equal(state.nextOmissionId, 2);
 
   // A second, distinct call must not reuse omitted-0001.
@@ -84,8 +92,8 @@ test("applyOmissions replays a stored omission onto a fresh message", () => {  c
     id: "omitted-0001",
     callId: "call-1",
     name: "read",
-    content: "original",
     tokens: 2,
+    path: "/tmp/omitted-0001.txt",
   };
   state.omittedCalls["call-1"] = "omitted-0001";
   const messages: Msg[] = [
@@ -117,14 +125,15 @@ test("applyOmissions fails closed when the cached original is gone", () => {
   assert.match(value, /cleared/);
 });
 
-test("emptyState carries the new stats fields and an empty memo", () => {
-  const stats = emptyState().stats;
-  assert.equal(stats.savedTokens, 0);
-  assert.equal(stats.tokenizerUsed ?? false, false);
-  assert.deepEqual(emptyState().pruneMemo, {});
+test("emptyState carries the new stats fields and no prune memo", () => {
+  const state = emptyState();
+  assert.equal(state.stats.summaryFallbacks, 0);
+  assert.equal(state.stats.measurementPath, undefined);
+  assert.equal("pruneMemo" in state, false);
+  assert.equal("savedTokens" in state.stats, false);
 });
 
-test("pruneToolResults reuses memoized measurement for identical content", () => {
+test("a repeat prune pass stores a fresh file and reports no memo fields", () => {
   const big = "x".repeat(2000);
   const make = (): Msg[] => [
     {
@@ -134,14 +143,14 @@ test("pruneToolResults reuses memoized measurement for identical content", () =>
     },
   ];
   const state = emptyState();
-  const first = pruneToolResults(make(), state);
+  const first = pruneToolResults(make(), state, DEFAULT_CONFIG, "ses-prune-repeat");
   assert.equal(first.pruned, 1);
-  assert.equal(first.memoHits, 0);
-  // Simulate a fresh pass over the same content (mapping cleared).
+  assert.equal("memoHits" in first, false);
+  // The memo is gone: a fresh pass over the same content is measured again.
   delete state.omittedCalls["c1"];
   delete state.omissions["omitted-0001"];
-  const second = pruneToolResults(make(), state);
+  const second = pruneToolResults(make(), state, DEFAULT_CONFIG, "ses-prune-repeat");
   assert.equal(second.pruned, 1);
-  assert.equal(second.memoHits, 1);
   assert.equal(second.tokens, first.tokens);
+  assert.equal("memoHits" in second, false);
 });

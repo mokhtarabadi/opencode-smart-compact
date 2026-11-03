@@ -5,6 +5,7 @@ import {
   buildAwarenessMessage,
   getAwarenessLevel,
   measureVisibleTokens,
+  resolveAwarenessWindow,
   resolveContextLimit,
   shouldAutoTrim,
   shouldFireAwareness,
@@ -63,6 +64,30 @@ test("resolveContextLimit returns undefined for a miss or an unusable limit", ()
     resolveContextLimit({ providerID: "x", id: "y" }, [{ providerID: "x", id: "y", limit: { context: -5 } }]),
     undefined,
   );
+});
+
+test("resolveAwarenessWindow prefers the registry and names its source", () => {
+  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 200_000 } }];
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 500_000), {
+    limitTokens: 200_000,
+    source: "registry",
+  });
+});
+
+test("resolveAwarenessWindow falls back to the configured window", () => {
+  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 0 } }];
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 150_000), {
+    limitTokens: 150_000,
+    source: "config",
+  });
+  // A configured value of 0 or a malformed value is "not configured".
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, 0), {});
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, Number.NaN), {});
+});
+
+test("resolveAwarenessWindow stays empty when neither source exists", () => {
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], 0), {});
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], undefined as never), {});
 });
 
 test("getAwarenessLevel maps the ratio to none, warn, and emergency", () => {
@@ -130,6 +155,30 @@ test("buildAwarenessMessage states the fill, the tool, and the advisory rules", 
   assert.match(text, /elevated context pressure/);
 });
 
+test("buildAwarenessMessage names a configured denominator", () => {
+  const text = buildAwarenessMessage({
+    usedTokens: 60_000,
+    limitTokens: 100_000,
+    ratioPct: 60,
+    level: "warn",
+    windowSource: "config",
+  });
+  // The operator must know the denominator was configured, not measured.
+  assert.match(text, /configured/);
+  assert.match(text, /awareness\.contextWindowTokens/);
+});
+
+test("buildAwarenessMessage does not claim a configured denominator from the registry", () => {
+  const text = buildAwarenessMessage({
+    usedTokens: 60_000,
+    limitTokens: 100_000,
+    ratioPct: 60,
+    level: "warn",
+    windowSource: "registry",
+  });
+  assert.equal(/awareness\.contextWindowTokens/.test(text), false);
+});
+
 test("buildAwarenessMessage escalates the wording at the emergency level", () => {
   const text = buildAwarenessMessage({
     usedTokens: 190000,
@@ -149,7 +198,7 @@ test("shouldAutoTrim fires on the first crossing and only re-arms after a step",
   const base = { autoTrimRatio: 0.5, rearmStep: 0.05, hasPending: false };
   assert.equal(shouldAutoTrim({ ...base, ratio: 0.4 }), false);
   assert.equal(shouldAutoTrim({ ...base, ratio: 0.5 }), true);
-  // 0 is the shipped default: auto-trim off.
+  // 0 means "never auto-trim", an explicit opt-out.
   assert.equal(shouldAutoTrim({ ...base, autoTrimRatio: 0, ratio: 0.99 }), false);
   // A compaction already queued for the next request wins over a weaker trim.
   assert.equal(shouldAutoTrim({ ...base, ratio: 0.99, hasPending: true }), false);

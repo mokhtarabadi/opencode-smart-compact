@@ -1,4 +1,5 @@
 import { DEFAULT_CONFIG, PRUNE_WEIGHTS, type SmartCompactConfig } from "./config.js";
+import { writeOmissionOriginal } from "./omissions.js";
 import { countTokens } from "./tokens.js";
 import type { Msg, OmissionRecord, Part, SessionState } from "./types.js";
 
@@ -87,52 +88,6 @@ function partCallId(part: Part): string | undefined {
 }
 
 /**
- * Small content hash over the entire string plus a length prefix. Any edit —
- * including one in the middle — changes the hash and invalidates the memo.
- */
-export function memoHash(text: string): string {
-  let hash = 5381;
-  for (let i = 0; i < text.length; i += 1) {
-    hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
-  }
-  return `${text.length}:${(hash >>> 0).toString(36)}`;
-}
-
-/** Whether a tool result is small enough to measure directly, memo aside. */
-function isSmallInput(text: string, config: SmartCompactConfig, tool?: string): boolean {
-  if (config.pruning.useTokens) {
-    // Token-heavy text (even a single long word) is never "small" here:
-    // the measured cost decides against the token budget for its tool.
-    const budget = (tool ?? "") === "task" ? config.pruning.taskMaxWords : config.pruning.maxWords;
-    return measureTokens(text, config) <= budget;
-  }
-  if (text.length > config.pruning.maxChars) return false;
-  return text.trim().split(/\s+/).filter(Boolean).length <= config.pruning.maxWords;
-}
-
-/**
- * Measure a tool result for one call id, reusing the memoized cost when the
- * content hash matches. Small inputs bypass the memo entirely — measuring
- * them directly is cheaper than bookkeeping. Returns the token cost and
- * whether the memo supplied it.
- */
-export function measureMemoized(
-  callId: string,
-  text: string,
-  config: SmartCompactConfig,
-  state: SessionState,
-  tool?: string,
-): { tokens: number; hit: boolean } {
-  if (isSmallInput(text, config, tool)) return { tokens: measureTokens(text, config), hit: false };
-  const hash = memoHash(text);
-  const entry = state.pruneMemo[callId];
-  if (entry && entry.hash === hash) return { tokens: entry.tokens, hit: true };
-  const tokens = measureTokens(text, config);
-  state.pruneMemo[callId] = { hash, tokens };
-  return { tokens, hit: false };
-}
-
-/**
  * Effective truncate cap for one tool. `task` keeps its higher bar: the cap
  * never bites below `taskMaxChars`. A non-positive `truncateToolsChars`
  * disables the cap for every tool.
@@ -175,11 +130,10 @@ export function pruneToolResults(
   messages: Msg[],
   state: SessionState,
   config: SmartCompactConfig = DEFAULT_CONFIG,
-): { pruned: number; tokens: number; memoHits: number; memoTokens: number } {
+  sessionID = "unscoped",
+): { pruned: number; tokens: number } {
   let pruned = 0;
   let tokens = 0;
-  let memoHits = 0;
-  let memoTokens = 0;
   const kept = preserveWindow(messages, config.pruning.preserveRecentTurns);
   // O1 D2: collect eligible tool results first, then prune in fixed-cost rank.
   // User turns never enter candidates — only tool-result kind is ranked here.
@@ -235,23 +189,30 @@ export function pruneToolResults(
     // Keep rank id linkage explicit for audit (no Map keyed by callId remains).
     void byRankId;
     const { part, callId, name, text } = entry;
-      const id = nextOmissionId(state);
-      // Reuse the memoized measurement when the content is unchanged; the
-      // memo only ever affects the reported cost, never the prune decision.
-      const measured = measureMemoized(callId, text, config, state, name);
-      const saved = measured.tokens;
-      if (measured.hit) {
-        memoHits += 1;
-        memoTokens += saved;
-      }
-      const record: OmissionRecord = { id, callId, name, content: text, tokens: saved };
-      state.omissions[id] = record;
-      state.omittedCalls[callId] = id;
-      part.result = { type: "text", value: omissionNotice(id, name, saved) };
-      pruned += 1;
-      tokens += saved;
+    const id = nextOmissionId(state);
+    const saved = measureTokens(text, config);
+    // The original goes to the bounded per-session file store; state keeps only
+    // the id-to-path mapping. If the write fails, keep the text inline so a
+    // retrieval still works instead of silently losing the original.
+    let path: string | undefined;
+    try {
+      path = writeOmissionOriginal(sessionID, id, text);
+    } catch (error) {
+      console.warn(
+        `[smart-compact] could not store omission ${id} on disk: ` +
+          `${(error as Error)?.message ?? error}; keeping it inline.`,
+      );
+    }
+    const record: OmissionRecord = path
+      ? { id, callId, name, tokens: saved, path }
+      : { id, callId, name, tokens: saved, content: text };
+    state.omissions[id] = record;
+    state.omittedCalls[callId] = id;
+    part.result = { type: "text", value: omissionNotice(id, name, saved) };
+    pruned += 1;
+    tokens += saved;
   }
-  return { pruned, tokens, memoHits, memoTokens };
+  return { pruned, tokens };
 }
 
 /** Re-apply stored omissions and discard rules on every request (idempotent). */

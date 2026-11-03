@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../src/index.js";
@@ -9,6 +9,9 @@ import type { Msg } from "../src/types.js";
 // The hook resolves the global config from XDG_CONFIG_HOME: point it at an
 // empty directory so the developer's real global file cannot change results.
 process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "smart-compact-xdg-"));
+// Omission originals now live on disk; keep every test file inside a temp dir
+// so the suite can never write into the developer's real data directory.
+process.env.SMART_COMPACT_DATA_DIR = mkdtempSync(join(tmpdir(), "smart-compact-data-"));
 
 /**
  * One assistant turn of `chars` characters. The plugin estimates about four
@@ -20,6 +23,27 @@ function bigMessage(chars: number): Msg {
     role: "assistant",
     content: [{ type: "text", text: "x".repeat(chars) }],
   };
+}
+
+/** One bulky completed tool result, which is what the emergency budget measures. */
+function bigToolResult(id: string, chars: number): Msg {
+  return {
+    role: "assistant",
+    content: [{ type: "tool-result", id, name: "bash", result: { type: "text", value: "x".repeat(chars) } }],
+  };
+}
+
+/** Run `fn` while collecting console.warn lines, restoring the console after. */
+async function captureWarnings(fn: () => Promise<void>): Promise<string[]> {
+  const original = console.warn;
+  const lines: string[] = [];
+  console.warn = (message: unknown) => void lines.push(String(message));
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return lines;
 }
 
 interface HarnessOptions {
@@ -228,16 +252,76 @@ test("autoTrimRatio queues a lossless trim below the advisory threshold", async 
   assert.equal(system.length, 0);
 });
 
-test("autoTrimRatio stays off by default", async () => {
+test("the shipped default arms auto-trim at 0.55", async () => {
   const h = await harness({ limitContext: 10_000 });
   const system: Array<{ type: string; text: string }> = [];
+  // 50 percent: below the shipped 0.55 line, nothing is queued.
   await h.hook({
-    sessionID: "ses-default",
+    sessionID: "ses-default-low",
     model: { providerID: "test", id: "model-x" },
     system,
     messages: [bigMessage(20000)],
   });
-  assert.equal((h.storage.get("session:ses-default") as { pending?: unknown } | undefined)?.pending ?? null, null);
+  assert.equal(
+    (h.storage.get("session:ses-default-low") as { pending?: unknown } | undefined)?.pending ?? null,
+    null,
+  );
+  // 60 percent: above the line, one lossless trim is queued with no manual call.
+  await h.hook({
+    sessionID: "ses-default-high",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [bigMessage(24000)],
+  });
+  assert.deepEqual(
+    (h.storage.get("session:ses-default-high") as { pending?: unknown } | undefined)?.pending,
+    { mode: "trim", keepTurns: 0 },
+  );
+});
+
+test("the shipped default reclaims tool output with no manual compaction call", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  const sessionID = "ses-auto-default";
+  const original = "z".repeat(24000);
+  // Three user messages so the bulky result sits outside the default
+  // preserve-recent-2-turns window and is therefore prunable.
+  const messages: Msg[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "start" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "tool-result", id: "call-big", name: "bash", result: { type: "text", value: original } }],
+    },
+    { id: "u2", role: "user", content: [{ type: "text", text: "continue" }] },
+    { id: "u3", role: "user", content: [{ type: "text", text: "still going" }] },
+  ];
+  const model = { providerID: "test", id: "model-x" };
+  // 60 percent of the window: the default line queues a trim, no tool call made.
+  await h.hook({ sessionID, model, system, messages });
+  assert.deepEqual(
+    (h.storage.get(`session:${sessionID}`) as { pending?: unknown }).pending,
+    { mode: "trim", keepTurns: 0 },
+  );
+  // The next model request applies it: the bulky result becomes a notice and
+  // the original moves to a per-session file, not the state blob.
+  await h.hook({ sessionID, model, system, messages });
+  const value = (messages[1]!.content[0]!.result as { value: string }).value;
+  assert.match(value, /omitted-0001/);
+  // Context dropped: the 24000-character payload is now a short notice.
+  assert.ok(value.length < original.length / 10);
+  const state = h.storage.get(`session:${sessionID}`) as {
+    pending?: unknown;
+    omissions: Record<string, { path?: string; content?: string }>;
+  };
+  // One sustained period queues exactly one trim: the consumed request is not
+  // re-queued at the same fill.
+  assert.equal(state.pending ?? null, null);
+  const record = state.omissions["omitted-0001"]!;
+  assert.equal(record.content, undefined);
+  assert.equal(typeof record.path, "string");
+  assert.ok(existsSync(record.path!));
+  assert.equal(readFileSync(record.path!, "utf8"), original);
 });
 
 test("a sustained high-pressure period queues one trim, not one per request", async () => {
@@ -410,8 +494,132 @@ test("a resolved model records its window in state", async () => {
   });
   const state = h.storage.get("session:ses-known") as {
     awarenessWindow?: unknown;
+    awarenessWindowSource?: unknown;
     awarenessModel?: unknown;
   };
   assert.equal(state.awarenessWindow, 10_000);
+  assert.equal(state.awarenessWindowSource, "registry");
   assert.equal(state.awarenessModel, "test/model-x");
+});
+
+test("a configured fallback window renders a ratio and names itself as configured", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-window-fallback-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(dir, ".opencode", "smart-compact.jsonc"),
+    '{"awareness": {"contextWindowTokens": 10000}}',
+  );
+  const h = await harness({ limitContext: 10_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  // The registry has no entry for this model, so only the configured window
+  // can produce a denominator — 20000 chars is about 5000 of 10000 tokens.
+  await h.hook({
+    sessionID: "ses-fallback",
+    model: { providerID: "custom", id: "acme-1" },
+    system,
+    messages: [bigMessage(20000)],
+  });
+  assert.equal(system.length, 1);
+  assert.match(system[0]!.text, /50%/);
+  assert.match(system[0]!.text, /configured/);
+  assert.match(system[0]!.text, /awareness\.contextWindowTokens/);
+  const state = h.storage.get("session:ses-fallback") as {
+    awarenessWindow?: unknown;
+    awarenessWindowSource?: unknown;
+  };
+  assert.equal(state.awarenessWindow, 10_000);
+  assert.equal(state.awarenessWindowSource, "config");
+});
+
+test("with neither a registry limit nor a configured window, awareness stays silent", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  await h.hook({
+    sessionID: "ses-no-window",
+    model: { providerID: "custom", id: "acme-1" },
+    system,
+    messages: [bigMessage(40000)],
+  });
+  assert.equal(system.length, 0);
+  const state = h.storage.get("session:ses-no-window") as {
+    awarenessWindow?: unknown;
+    awarenessWindowSource?: unknown;
+  };
+  assert.equal(state.awarenessWindow, undefined);
+  assert.equal(state.awarenessWindowSource, undefined);
+});
+
+test("a 1M window keeps the derived emergency budget quiet during normal work", async () => {
+  const h = await harness({ limitContext: 1_000_000 });
+  const sessionID = "ses-budget-1m";
+  h.storage.set(`session:${sessionID}`, { pending: { mode: "trim", keepTurns: 0 } });
+  const warnings = await captureWarnings(async () => {
+    // ~100K measured tokens against a derived 600K budget for a 1M window.
+    await h.hook({
+      sessionID,
+      model: { providerID: "test", id: "model-x" },
+      system: [],
+      messages: [bigToolResult("call-1m", 400_000)],
+    });
+  });
+  assert.equal(warnings.some((line) => /emergency budget/.test(line)), false);
+});
+
+test("the derived emergency budget fires near the window-scaled line", async () => {
+  const h = await harness({ limitContext: 100_000 });
+  const sessionID = "ses-budget-warn";
+  h.storage.set(`session:${sessionID}`, { pending: { mode: "trim", keepTurns: 0 } });
+  const warnings = await captureWarnings(async () => {
+    // ~75000 measured tokens against the derived 60000 (60 percent of 100K).
+    await h.hook({
+      sessionID,
+      model: { providerID: "test", id: "model-x" },
+      system: [],
+      messages: [bigToolResult("call-warn", 300_000)],
+    });
+  });
+  assert.ok(warnings.some((line) => /over the emergency budget of 60000 tokens/.test(line)));
+});
+
+test("an explicit emergency override behaves exactly as configured", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "smart-compact-budget-override-"));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(dir, ".opencode", "smart-compact.jsonc"),
+    '{"tokens": {"emergencyBudgetTokens": 1000}}',
+  );
+  const h = await harness({ limitContext: 1_000_000, directory: dir });
+  const sessionID = "ses-budget-override";
+  h.storage.set(`session:${sessionID}`, { pending: { mode: "trim", keepTurns: 0 } });
+  const warnings = await captureWarnings(async () => {
+    // ~2000 measured tokens: over the pinned 1000 even on a 1M window.
+    await h.hook({
+      sessionID,
+      model: { providerID: "test", id: "model-x" },
+      system: [],
+      messages: [bigToolResult("call-override", 8000)],
+    });
+  });
+  assert.ok(warnings.some((line) => /over the emergency budget of 1000 tokens/.test(line)));
+});
+
+test("an unknown window disables the derived emergency warning", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const sessionID = "ses-budget-unknown";
+  h.storage.set(`session:${sessionID}`, { pending: { mode: "trim", keepTurns: 0 } });
+  const warnings = await captureWarnings(async () => {
+    await h.hook({
+      sessionID,
+      model: { providerID: "custom", id: "acme-1" },
+      system: [],
+      messages: [bigToolResult("call-unknown", 400_000)],
+    });
+  });
+  assert.equal(warnings.some((line) => /emergency budget/.test(line)), false);
 });

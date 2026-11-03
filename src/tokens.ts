@@ -10,6 +10,7 @@
  */
 
 import { createRequire } from "node:module";
+import type { MeasurementPath } from "./types.js";
 
 declare const require: ((id: string) => unknown) | undefined;
 
@@ -61,6 +62,16 @@ function loadTokenizerOnce(): Tokenizer | null {
 /** Whether a real tokenizer (not the fallback) is backing measurements. */
 export function isTokenizerAvailable(): boolean {
   return loadTokenizerOnce() !== null;
+}
+
+/**
+ * The measurement path that will actually produce the numbers for a run:
+ * the tokenizer only when measurement is enabled AND the optional package
+ * loaded; otherwise the dependency-free heuristic. Surfaced in `compact_stats`
+ * so an operator can tell which code produced the figures.
+ */
+export function measurementPath(enabled: boolean): MeasurementPath {
+  return enabled && isTokenizerAvailable() ? "tokenizer" : "heuristic";
 }
 
 /**

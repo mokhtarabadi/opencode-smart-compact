@@ -4,9 +4,11 @@ import {
   chunkTurns,
   heuristicSummary,
   parseSummaryBlocks,
+  summarizeTurns,
   type PendingTurn,
 } from "../src/summarize.js";
 import type { Turn } from "../src/plan.js";
+import { emptyState } from "../src/types.js";
 
 function pending(firstId: string, body: string): PendingTurn {
   const turn: Turn = { userText: "u", assistants: [{ id: firstId, text: body }] };
@@ -48,4 +50,47 @@ test("chunkTurns gives an oversized turn its own chunk", () => {
 test("heuristicSummary collapses whitespace and truncates", () => {
   assert.equal(heuristicSummary("a   b\n c"), "a b c");
   assert.ok(heuristicSummary("x".repeat(500)).length <= 401);
+});
+
+test("summarizeTurns counts heuristic fallbacks when the reply omits blocks", async () => {
+  const state = emptyState();
+  const turns: Turn[] = [
+    { userText: "one", assistants: [{ id: "a1", text: "first body" }] },
+    { userText: "two", assistants: [{ id: "a2", text: "second body" }] },
+  ];
+  const ctx = { generate: { text: async () => ({ text: "no summary blocks here" }) } };
+  const result = await summarizeTurns(ctx as never, turns, state);
+  assert.equal(result.summarized, 2);
+  // P7: an unmeasured quality cliff is a defect, so every miss is counted.
+  assert.equal(result.fallbacks, 2);
+  assert.equal(state.summaries["a1"], "first body");
+});
+
+test("summarizeTurns reports zero fallbacks when every block parses", async () => {
+  const state = emptyState();
+  const turns: Turn[] = [{ userText: "one", assistants: [{ id: "a1", text: "body" }] }];
+  const ctx = {
+    generate: {
+      text: async () => ({ text: '<summary id="a1">A real summary.</summary>' }),
+    },
+  };
+  const result = await summarizeTurns(ctx as never, turns, state);
+  assert.equal(result.summarized, 1);
+  assert.equal(result.fallbacks, 0);
+  assert.equal(state.summaries["a1"], "A real summary.");
+});
+
+test("summarizeTurns counts a failing model call as a fallback", async () => {
+  const state = emptyState();
+  const turns: Turn[] = [{ userText: "one", assistants: [{ id: "a1", text: "body" }] }];
+  const ctx = {
+    generate: {
+      text: async () => {
+        throw new Error("model unavailable");
+      },
+    },
+  };
+  const result = await summarizeTurns(ctx as never, turns, state);
+  assert.equal(result.summarized, 1);
+  assert.equal(result.fallbacks, 1);
 });

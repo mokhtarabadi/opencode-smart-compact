@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Auto-trim ships armed: `awareness.autoTrimRatio` now defaults to `0.55` (was `0`), so a long session reclaims bulky tool output without a manual `compact_context` call. The existing hysteresis is unchanged — one sustained period queues one trim, and the latch re-arms only on growth or after the fill drops below the line. Task 61 P1.
+- Emergency budget scales with the model window: `tokens.emergencyBudgetTokens` defaults to `0` (derive) and `tokens.emergencyBudgetRatio` (default `0.6`) is applied to the resolved `limit.context`. A positive `emergencyBudgetTokens` stays an exact override, `emergencyBudgetRatio: 0` disables the derived warning, and an unknown window keeps it silent instead of firing forever. One per-request window lookup feeds both the budget and the reminder. Task 61 P2.
+- Awareness gains `awareness.contextWindowTokens`, used only when the model registry entry has no usable `limit.context`; the reminder and the stats line state the denominator is configured, and with neither source the advisory still stays silent. Task 61 P3.
+- `compact_stats` and `/magic-stats` now start with the plugin version, report which measurement path produced the numbers (`tokenizer` or `heuristic`), and count heuristic summary fallbacks. Task 61 P4/P7/F8.
+- README documents the estimator calibration: roughly four characters per token is a lower bound for tool JSON and code.
+- **Breaking (config semantics):** `tokens.emergencyBudgetTokens: 0` used to disable the warning and now means "derive from the window", with `tokens.emergencyBudgetRatio: 0` as the explicit opt-out. Anyone who pinned `0` to silence the warning must set the ratio to `0` instead. A positive `emergencyBudgetTokens` (for example an existing `50000`) still behaves exactly as before and stays absolute until changed. Task 61 P2.
+
+### Added
+
+- Bounded per-session omission store (`src/omissions.ts`): pruned originals move out of session state into one file per omission (500 files / 8 MiB per session, oldest-first eviction), state keeps only the id-to-path mapping, legacy inline originals migrate on first load, and `read_omitted_content` caps a single response at 20000 characters with an explicit truncation notice while a missing original still fails closed. Task 61 P5.
+
+### Removed
+
+- `pruneMemo` (the call-id keyed token memo) and the `memo-saved` stat: it measured about zero benefit while writing one entry per call into state. Legacy state drops the field on load. Task 61 P6.
+
 ### Added
 
 - Awareness denominator made visible: the resolved context window (`awarenessWindow`) and model name (`awarenessModel`) persist in session state, `compact_stats` ends with `window <tokens> (<model>)`, and an unknown model (or registry entry without `limit.context`) logs one `[smart-compact] awareness disabled` line per model instead of staying silently advisory-free. Silence-by-design is kept — no ratio is ever guessed — but it is now diagnosable from the stats line. Pinned by three `formatStats` tests and two hook-level tests.

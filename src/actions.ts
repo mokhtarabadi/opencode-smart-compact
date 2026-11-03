@@ -4,11 +4,19 @@
  * can never drift.
  */
 import { buildTurns, selectTurns, type HistoryEntry } from "./plan.js";
-import { summarizeTurns } from "./summarize.js";
-import { isOverEmergencyBudget, loadConfig, type BudgetState } from "./config.js";
+import { summarizeTurns, type SummarizeResult } from "./summarize.js";
+import {
+  emergencyBudgetDescription,
+  isOverEmergencyBudget,
+  loadConfig,
+  resolveEmergencyBudget,
+  type BudgetState,
+} from "./config.js";
 import { measureTokens } from "./prune.js";
 import { loadState, saveState, type BackupPointer, type Ctx } from "./store.js";
+import { measurementPath } from "./tokens.js";
 import type { SessionState } from "./types.js";
+import { PLUGIN_VERSION } from "./version.js";
 
 export type CompactMode = "compact" | "trim";
 
@@ -43,36 +51,50 @@ export function parseCompactArgs(input: unknown): CompactArgs {
 /**
  * Summarize the eligible turns now (each becomes a short summary; user
  * messages stay verbatim) and schedule the tool-output prune pass for the next
- * request. Returns the number of turns summarized.
+ * request. Returns how many turns were summarized and how many fell back to
+ * the heuristic.
  *
  * The emergency budget check runs before any work and is a warning only: an
  * over-budget history still compacts, because refusing it would deadlock the
- * sessions that need compaction most. A zero budget disables the warning.
+ * sessions that need compaction most. The budget is derived from the best
+ * denominator this path has — the window persisted by the last awareness pass
+ * — so a 1M-token session is not warned at 50K. An explicit override or no
+ * known window is handled by `resolveEmergencyBudget`.
  */
-export async function compactNow(ctx: Ctx, sessionID: string, keepTurns: number): Promise<number> {
+export async function compactNow(
+  ctx: Ctx,
+  sessionID: string,
+  keepTurns: number,
+): Promise<SummarizeResult> {
   const config = await loadConfig(ctx);
   const state = await loadState(ctx, sessionID);
   const entries = (await ctx.session.context({ sessionID })) as unknown as HistoryEntry[];
   const measuredCost = measureHistoryCost(entries, config);
-  if (isOverEmergencyBudget(measuredCost, config)) {
+  if (isOverEmergencyBudget(measuredCost, config, state.awarenessWindow)) {
+    const budget = resolveEmergencyBudget(config, state.awarenessWindow);
     // Warning only: an explicit compaction request must always proceed, because
     // compaction is the remedy for an over-budget history, not a hazard.
     console.warn(
-      `[smart-compact] history is over the emergency budget of ` +
-        `${config.tokens.emergencyBudgetTokens} tokens (measured ~${measuredCost}); ` +
-        `compacting anyway. Raise tokens.emergencyBudgetTokens to silence this warning.`,
+      `[smart-compact] history is over the emergency budget of ${budget} tokens ` +
+        `(${emergencyBudgetDescription(config, state.awarenessWindow)}; measured ~${measuredCost}); ` +
+        `compacting anyway. Raise tokens.emergencyBudgetTokens or tokens.emergencyBudgetRatio ` +
+        `to silence this warning.`,
     );
   }
   const turns = buildTurns(entries);
-  const summarized = await summarizeTurns(
+  const result = await summarizeTurns(
     ctx,
     selectTurns(turns, keepTurns, config.pruning.preserveRecentTurns),
     state,
   );
-  state.stats.summarizedTurns += summarized;
+  state.stats.summarizedTurns += result.summarized;
+  state.stats.summaryFallbacks += result.fallbacks;
+  // The history cost above was measured with this path; record it so the stats
+  // line names the code that produced the numbers.
+  state.stats.measurementPath = measurementPath(config.tokens.enabled);
   state.pending = { mode: "compact", keepTurns };
   await saveState(ctx, sessionID, state);
-  return summarized;
+  return result;
 }
 
 /**
@@ -118,13 +140,17 @@ export function formatStats(state: SessionState): string {
   const prunedTokens = num(stats?.prunedTokens);
   const prunedParts = num(stats?.prunedParts);
   const summarizedTurns = num(stats?.summarizedTurns);
-  const savedTokens = num(stats?.savedTokens);
+  const summaryFallbacks = num(stats?.summaryFallbacks);
   const lastRunMs = num(stats?.lastRunMs);
   const cached = state?.omissions && typeof state.omissions === "object" ? Object.keys(state.omissions).length : 0;
-  const tokenizer = stats?.tokenizerUsed === true ? "on" : "off";
+  // Which measurement path produced the numbers: the optional tokenizer or the
+  // built-in estimate. Defaults to heuristic for a fresh or legacy session.
+  const measurement = stats?.measurementPath === "tokenizer" ? "tokenizer" : "heuristic";
   // Awareness denominator, so a silent advisory is diagnosable from the same
   // line: either the resolved window plus the model it came from, or the
-  // model the registry failed on. Malformed values render "unknown", never throw.
+  // model the registry failed on. A configured fallback is called out so the
+  // operator knows the denominator was supplied, not measured. Malformed
+  // values render "unknown", never throw.
   const windowTokens =
     typeof state?.awarenessWindow === "number" && Number.isFinite(state.awarenessWindow) && state.awarenessWindow > 0
       ? Math.floor(state.awarenessWindow)
@@ -133,15 +159,15 @@ export function formatStats(state: SessionState): string {
     typeof state?.awarenessModel === "string" && state.awarenessModel.length > 0
       ? state.awarenessModel
       : "no model seen yet";
+  const configured = state?.awarenessWindowSource === "config" ? " — configured" : "";
   const windowPart =
     windowTokens > 0
-      ? `window ${windowTokens} (${modelName})`
+      ? `window ${windowTokens} (${modelName}${configured})`
       : `window unknown (${modelName} — awareness off)`;
   return (
-    `[smart-compact] pruned ~${prunedTokens} tokens across ${prunedParts} tool results; ` +
-    `summarized ${summarizedTurns} turns; ${cached} cached omissions; ` +
-    `memo-saved ~${savedTokens} tokens; last run ${lastRunMs}ms; ` +
-    `tokenizer ${tokenizer}; ${windowPart}.`
+    `[smart-compact] version ${PLUGIN_VERSION}; pruned ~${prunedTokens} tokens across ${prunedParts} tool results; ` +
+    `summarized ${summarizedTurns} turns (fallbacks: ${summaryFallbacks}); ${cached} cached omissions; ` +
+    `last run ${lastRunMs}ms; measurement ${measurement}; ${windowPart}.`
   );
 }
 
