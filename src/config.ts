@@ -91,12 +91,10 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     maxWords: 128,
     taskMaxChars: 4096,
     taskMaxWords: 512,
-    protectedTools: ["question"],
+    protectedTools: ["question", "skill"],
     alwaysPruneTools: ["read"],
     discardTools: {
       todowrite: "Successfully updated todos.",
-      skill:
-        "Skill contents omitted after compaction; recall the skill if needed.",
     },
     preserveRecentTurns: 2,
     truncateToolsChars: 1024,
@@ -294,11 +292,19 @@ function mergeConfig(
       alwaysPruneTools: Array.isArray(pruning?.alwaysPruneTools)
         ? (pruning.alwaysPruneTools as string[])
         : base.pruning.alwaysPruneTools,
-      discardTools: {
-        ...base.pruning.discardTools,
-        ...(asRecord(pruning?.discardTools) as
-          Record<string, string> | undefined),
-      },
+      discardTools: (() => {
+        const baseTools = { ...base.pruning.discardTools };
+        const entries = Object.entries(
+          (asRecord(pruning?.discardTools) as
+            | Record<string, string | null>
+            | undefined) ?? {},
+        );
+        for (const [k, v] of entries) {
+          if (v === null) delete baseTools[k];
+          else if (typeof v === "string") baseTools[k] = v;
+        }
+        return baseTools;
+      })(),
       preserveRecentTurns:
         typeof pruning?.preserveRecentTurns === "number"
           ? pruning.preserveRecentTurns

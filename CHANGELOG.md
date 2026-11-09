@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Skill output no longer discarded by default: `discardTools` drops the `skill` entry (only `todowrite` remains), `protectedTools` now defaults to `["question", "skill"]`, and a user `null` value can now remove a default discard key. Closes the empty `Load Skill` failure where every skill load returned the placeholder notice.
+
 ### Changed
 
 - Auto-trim ships armed: `awareness.autoTrimRatio` now defaults to `0.55` (was `0`), so a long session reclaims bulky tool output without a manual `compact_context` call. The existing hysteresis is unchanged — one sustained period queues one trim, and the latch re-arms only on growth or after the fill drops below the line. Task 61 P1.
