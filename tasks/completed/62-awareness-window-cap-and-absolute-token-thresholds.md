@@ -1,9 +1,10 @@
 # Task 62: cap the awareness denominator and add absolute token thresholds
 
-**File:** `tasks/qa/62-awareness-window-cap-and-absolute-token-thresholds.md`
+**File:** `tasks/completed/62-awareness-window-cap-and-absolute-token-thresholds.md`
 **Source:** manager (2026-11-10, after a ~10 hour session on a 1,000,000-token model ran to 9.7M characters of transcript with zero awareness reminders and zero automatic trims)
 **Type:** bug
-**Status:** qa
+**Status:** closed
+**Finished:** 2026-11-10T11:53:22Z
 
 ## Goal
 
@@ -144,5 +145,5 @@ This is the exact state the defect report said was never written: `awarenessLast
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-**Factual Git Diff:** Pending — staged and injected by the Manager's commit path.
+**Factual Git Diff:** Stored in Commit Hash: `053684b27fbf9d94eedb9a5e8afc09874220c4cb`
 <!-- END_GIT_DIFF -->
