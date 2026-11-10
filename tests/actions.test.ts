@@ -98,6 +98,31 @@ test("formatStats marks a denominator supplied by config, not the registry", () 
   assert.match(text, /window 200000 \(custom\/acme-1 — configured\)\./);
 });
 
+test("formatStats reports a denominator capped by config and the registry it capped", () => {
+  const state = emptyState();
+  state.awarenessWindow = 200_000;
+  state.awarenessWindowSource = "config";
+  state.awarenessWindowRegistry = 1_000_000;
+  state.awarenessWindowCapped = true;
+  state.awarenessModel = "opencode-go/model";
+  const text = formatStats(state);
+  // One line, existing shape kept, cap appended inside the same parenthetical.
+  assert.match(text, /window 200000 \(opencode-go\/model — configured, capped from 1000000\)\./);
+  assert.equal(text.split("\n").length, 1);
+});
+
+test("formatStats omits the cap note when the denominator was not capped", () => {
+  const state = emptyState();
+  state.awarenessWindow = 1_000_000;
+  state.awarenessWindowSource = "registry";
+  state.awarenessWindowRegistry = 1_000_000;
+  state.awarenessWindowCapped = false;
+  state.awarenessModel = "opencode-go/model";
+  const text = formatStats(state);
+  assert.match(text, /window 1000000 \(opencode-go\/model\)\./);
+  assert.equal(/capped/.test(text), false);
+});
+
 test("formatStats names the model the registry failed on", () => {
   const state = emptyState();
   state.awarenessWindow = undefined;

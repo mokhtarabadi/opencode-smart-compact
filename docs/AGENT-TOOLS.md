@@ -98,10 +98,10 @@ Call example: `compact_stats({})`
 Returns:
 
 ```text
-[smart-compact] version 0.2.1; pruned ~130226 tokens across 213 tool results; summarized 0 turns (fallbacks: 0); 13 cached omissions; last run 1ms; measurement heuristic; window 1000000 (opencode-go/model — configured).
+[smart-compact] version 0.3.0; pruned ~130226 tokens across 213 tool results; summarized 0 turns (fallbacks: 0); 13 cached omissions; last run 1ms; measurement heuristic; window 200000 (opencode-go/model — configured, capped from 1000000).
 ```
 
-Reading it: `prunedParts` counts tool results that were replaced, `cached omissions` is how many omission records are retained under the store cap (500 files / 8 MiB per session) — an evicted original is still listed here until its mapping is rewritten, but reading it fails closed with the `missing original` notice rather than returning stale text — `summarizedTurns` stays 0 unless a compaction with `mode: "compact"` ran, `fallbacks` counts summaries that degraded to the heuristic, `measurement` names the path that produced the token numbers (`tokenizer` or `heuristic`), and `version` proves which plugin code produced the figures. `— configured` means the window came from `awareness.contextWindowTokens`, not the model registry.
+Reading it: `prunedParts` counts tool results that were replaced, `cached omissions` is how many omission records are retained under the store cap (500 files / 8 MiB per session) — an evicted original is still listed here until its mapping is rewritten, but reading it fails closed with the `missing original` notice rather than returning stale text — `summarizedTurns` stays 0 unless a compaction with `mode: "compact"` ran, `fallbacks` counts summaries that degraded to the heuristic, `measurement` names the path that produced the token numbers (`tokenizer` or `heuristic`), and `version` proves which plugin code produced the figures. `— configured` means the window came from `awareness.contextWindowTokens` rather than the model registry, and `, capped from 1000000` means that configured value deliberately shrank a larger registry window, so the percentage is a fraction of the cap and the token counts are the real measure.
 
 ## 3. Rules for you
 
@@ -130,13 +130,14 @@ Reading it: `prunedParts` counts tool results that were replaced, `cached omissi
   "tokens": { "enabled": true, "emergencyBudgetTokens": 0, "emergencyBudgetRatio": 0.6 },
   "awareness": {
     "enabled": true, "warnRatio": 0.5, "emergencyRatio": 0.8, "rearmStep": 0.05,
-    "autoTrimRatio": 0.55, "contextWindowTokens": 0
+    "autoTrimRatio": 0.55, "contextWindowTokens": 0,
+    "warnAtTokens": 0, "emergencyAtTokens": 0
   }
 }
 ```
 5. Human tools are out of scope. Only the three tools above are agent-callable. Ignore file-system, shell, or Manager UI tools.
 
-`autoTrimRatio: 0.55` is armed by default: a long session trims its own tool output without a `compact_context` call. `contextWindowTokens` is only needed for providers whose model registry entry lacks `limit.context`.
+`autoTrimRatio: 0.55` is armed by default: a long session trims its own tool output without a `compact_context` call. `contextWindowTokens` is needed for providers whose model registry entry lacks `limit.context`, and a positive value also CAPS a larger registry window (`min(registry, configured)`) — that is the supported way to make ratio thresholds reachable on a 1,000,000-token model. `warnAtTokens` / `emergencyAtTokens` add absolute thresholds in measured tokens (`0` = disabled; the stronger of the ratio and token levels fires), and the plugin logs exactly one `awareness <level> fired: …` line per reminder and one `auto-trim queued: …` line per queued trim, so an operator can tell a silent session from a firing one.
 
 ## 4. Minimal decision flow
 
@@ -162,6 +163,6 @@ What it means and what to do:
 - It is advisory. If you are mid-critical-step, finish the step, then compact right after. Never abort a half-written edit, a running tool call, or a commit sequence to compact.
 - Your user messages are never summarized, and pruned tool output stays retrievable via `read_omitted_content` by Content ID.
 
-It fires once per crossing, not on every request, and re-arms only after the fill grows by a further step. Configure it under `awareness` in the config file (`enabled`, `warnRatio`, `emergencyRatio`, `rearmStep`); set `enabled: false` to silence it.
+It fires once per crossing, not on every request, and re-arms only after the fill grows by a further step. Configure it under `awareness` in the config file (`enabled`, `warnRatio`, `emergencyRatio`, `rearmStep`, `warnAtTokens`, `emergencyAtTokens`); set `enabled: false` to silence it. The two `…AtTokens` keys are absolute lines in measured tokens for windows where a percentage is unreachable, and the fired level is whichever of the ratio and the token line is stronger.
 
 `awareness.autoTrimRatio` is the only automatic action: at or above that fill the plugin queues a tool-output-only trim for the next request by itself. It never summarizes a turn and never touches a user message, so nothing you need to reason about is lost, and every pruned original stays available through `read_omitted_content`. `0` disables it.

@@ -102,11 +102,24 @@ export interface SessionState {
    */
   awarenessWindow?: number;
   /**
-   * Where `awarenessWindow` came from: the model registry or the configured
-   * `awareness.contextWindowTokens` fallback. Lets the reminder and the stats
+   * Where `awarenessWindow` came from: the model registry, or the configured
+   * `awareness.contextWindowTokens` value (as a fallback when the registry has
+   * no limit, or as a cap on a larger one). Lets the reminder and the stats
    * line say the denominator is configured rather than measured.
    */
   awarenessWindowSource?: "registry" | "config";
+  /**
+   * The registry's own window when it carried a usable `limit.context`, even
+   * when `awarenessWindow` is a smaller configured cap. Absent when the
+   * registry had no limit. Lets `compact_stats` render
+   * `capped from <tokens>` without re-querying the registry.
+   */
+  awarenessWindowRegistry?: number;
+  /**
+   * True when `awareness.contextWindowTokens` reduced a larger registry window.
+   * Absent or false means the effective window is the registry's own number.
+   */
+  awarenessWindowCapped?: boolean;
   /**
    * "providerID/id" of the model seen on the last awareness pass. Recorded
    * even when the window is unknown, so the stats line can name the model

@@ -15,7 +15,8 @@ import { applySummaries } from "./apply.js";
 import {
   autoTrimResetLine,
   buildAwarenessMessage,
-  getAwarenessLevel,
+  getEffectiveAwarenessLevel,
+  isBelowAwarenessRearmLine,
   measureVisibleTokens,
   resolveAwarenessWindow,
   shouldAutoTrim,
@@ -164,10 +165,10 @@ async function listModels(ctx: Ctx): Promise<ReadonlyArray<AwarenessModel>> {
 }
 
 /**
- * Resolve the window once per model request: the registry limit first, then
- * the configured `awareness.contextWindowTokens` fallback. The same result
- * feeds the emergency budget and the awareness reminder, so the two cannot
- * use different denominators.
+ * Resolve the window once per model request: the registry limit capped by the
+ * configured `awareness.contextWindowTokens` value (see
+ * `resolveAwarenessWindow`). The same result feeds the emergency budget and the
+ * awareness reminder, so the two cannot use different denominators.
  */
 async function resolveWindowForRequest(
   ctx: Ctx,
@@ -179,7 +180,7 @@ async function resolveWindowForRequest(
       | { providerID: string; id: string }
       | undefined;
     if (!modelRef || typeof modelRef.providerID !== "string" || typeof modelRef.id !== "string") {
-      return {};
+      return { capped: false };
     }
     let models: ReadonlyArray<AwarenessModel> = [];
     try {
@@ -198,7 +199,7 @@ async function resolveWindowForRequest(
   } catch (error) {
     // Never break the model call over a window lookup.
     console.warn(`[smart-compact] window resolution failed: ${(error as Error)?.message ?? error}`);
-    return {};
+    return { capped: false };
   }
 }
 
@@ -241,17 +242,21 @@ async function runAwareness(
       if (
         state.awarenessModel !== modelKey ||
         state.awarenessWindow !== undefined ||
-        state.awarenessWindowSource !== undefined
+        state.awarenessWindowSource !== undefined ||
+        state.awarenessWindowRegistry !== undefined ||
+        state.awarenessWindowCapped !== undefined
       ) {
         state.awarenessModel = modelKey;
         state.awarenessWindow = undefined;
         state.awarenessWindowSource = undefined;
+        state.awarenessWindowRegistry = undefined;
+        state.awarenessWindowCapped = undefined;
         await saveState(ctx, sessionID, state);
         console.log(
           `[smart-compact] awareness disabled: unknown model ${modelKey} or missing context limit — ` +
             `no pressure ratio can be computed, so no advisory will fire. ` +
             `Check that the model registry entry carries limit.context, or set ` +
-            `awareness.contextWindowTokens.`,
+            `awareness.contextWindowTokens (a positive value is also a cap on a larger registry window).`,
         );
       }
       return;
@@ -259,15 +264,26 @@ async function runAwareness(
     if (
       state.awarenessModel !== modelKey ||
       state.awarenessWindow !== limitTokens ||
-      state.awarenessWindowSource !== window.source
+      state.awarenessWindowSource !== window.source ||
+      state.awarenessWindowRegistry !== window.registryTokens ||
+      state.awarenessWindowCapped !== window.capped
     ) {
       state.awarenessModel = modelKey;
       state.awarenessWindow = limitTokens;
       state.awarenessWindowSource = window.source;
+      state.awarenessWindowRegistry = window.registryTokens;
+      state.awarenessWindowCapped = window.capped;
       await saveState(ctx, sessionID, state);
     }
     const usedTokens = measureVisibleTokens(messages);
     const ratio = usedTokens / limitTokens;
+    // One-line provenance for the two numbers every diagnostic below reports:
+    // the effective denominator, the registry's own number, and whether the
+    // configured value capped it. Built once per request, logged only on a fire
+    // or a queued trim, so a quiet request stays silent.
+    const windowFacts = `${usedTokens}/${limitTokens} (${Math.round(ratio * 100)}%) registry=${
+      window.registryTokens ?? "none"
+    } capped=${window.capped}`;
     // Lossless relief below the advisory threshold: schedule the tool-output
     // prune pass for the next request. Nothing is summarized and no user
     // message is touched, so this is safe to do without asking the agent.
@@ -294,31 +310,34 @@ async function runAwareness(
       state.autoTrimLastRatio = ratio;
       stateChanged = true;
       console.log(
-        `[smart-compact] ${Math.round(ratio * 100)}% of the window is in use; ` +
-          `tool output will be trimmed on the next request.`,
+        `[smart-compact] auto-trim queued: ${windowFacts}; tool output will be trimmed on the next request.`,
       );
     }
     if (stateChanged) await saveState(ctx, sessionID, state);
-    // Hysteresis: the latch is cleared only once the context has fallen
-    // meaningfully below the warn threshold. Clearing it on every small dip
-    // under the threshold would let a session hovering at the boundary re-fire
-    // the reminder on alternating requests.
-    if (ratio < awareness.warnRatio - awareness.rearmStep) {
-      if (state.awarenessLastRatio !== undefined || state.awarenessLastLevel !== undefined) {
+    // The fired level is the stronger of the ratio signal and the absolute
+    // token signal. Ratios are meaningless on a 1M-token window, so an install
+    // can arm `warnAtTokens` / `emergencyAtTokens` and be warned at a real size
+    // instead of waiting for a percentage no session reaches.
+    const level = getEffectiveAwarenessLevel(usedTokens, ratio, awareness);
+    // Hysteresis: the latch is cleared only once every armed signal has fallen
+    // meaningfully below its warn line. Clearing it on every small dip under a
+    // threshold would let a session hovering at the boundary re-fire the
+    // reminder on alternating requests.
+    if (level === "none") {
+      if (
+        isBelowAwarenessRearmLine({ usedTokens, ratio, cfg: awareness }) &&
+        (state.awarenessLastRatio !== undefined || state.awarenessLastLevel !== undefined)
+      ) {
         state.awarenessLastRatio = undefined;
         state.awarenessLastLevel = undefined;
         await saveState(ctx, sessionID, state);
       }
       return;
     }
-    // Between the clear line and the warn line: keep the latch, stay quiet.
-    if (ratio < awareness.warnRatio) return;
-    const level = getAwarenessLevel(ratio, awareness);
-    if (level === "none") return;
     // Emergency re-fires on every request while the pressure stays at or
     // above the emergency line: a heads-down agent must not get one nudge and
     // then silence. The single-shot latch below applies to warn only; the
-    // hysteresis clear above still clears both levels once the fill drops.
+    // hysteresis clear above still clears both levels once the pressure drops.
     if (level !== "emergency") {
       if (
         !shouldFireAwareness(
@@ -337,11 +356,19 @@ async function runAwareness(
       ratioPct: Math.round(ratio * 100),
       level,
       windowSource: window.source,
+      registryTokens: window.registryTokens,
+      capped: window.capped,
+      // Below the ratio warn line, a fired level can only have come from the
+      // absolute token line, so say so in the reminder text.
+      absoluteTriggered: ratio < awareness.warnRatio,
     });
     (system as Array<{ type: string; text: string }>).push({ type: "text", text });
     state.awarenessLastRatio = ratio;
     state.awarenessLastLevel = level;
     await saveState(ctx, sessionID, state);
+    // Exactly one diagnostic line per fired reminder (never per request), so a
+    // silent session and a firing session are distinguishable from the logs.
+    console.log(`[smart-compact] awareness ${level} fired: ${windowFacts}`);
   } catch {
     // Advisory only: a failure here must never break the model call.
   }

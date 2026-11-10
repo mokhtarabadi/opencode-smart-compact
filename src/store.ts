@@ -102,6 +102,17 @@ export async function loadState(ctx: Ctx, sessionID: string): Promise<SessionSta
       value.awarenessWindowSource === "registry" || value.awarenessWindowSource === "config"
         ? value.awarenessWindowSource
         : undefined,
+    // The registry number and the cap flag back the `capped from <tokens>`
+    // suffix in `compact_stats`; a missing whitelist entry would silently drop
+    // them on every load, so both are validated here.
+    awarenessWindowRegistry:
+      typeof value.awarenessWindowRegistry === "number" &&
+      Number.isFinite(value.awarenessWindowRegistry) &&
+      value.awarenessWindowRegistry > 0
+        ? Math.floor(value.awarenessWindowRegistry)
+        : undefined,
+    awarenessWindowCapped:
+      typeof value.awarenessWindowCapped === "boolean" ? value.awarenessWindowCapped : undefined,
     awarenessModel:
       typeof value.awarenessModel === "string" && value.awarenessModel.length > 0
         ? value.awarenessModel

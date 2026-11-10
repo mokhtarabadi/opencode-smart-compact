@@ -46,6 +46,30 @@ async function captureWarnings(fn: () => Promise<void>): Promise<string[]> {
   return lines;
 }
 
+/** Run `fn` while collecting console.log lines, restoring the console after. */
+async function captureLogs(fn: () => Promise<void>): Promise<string[]> {
+  const original = console.log;
+  const lines: string[] = [];
+  console.log = (message: unknown) => void lines.push(String(message));
+  try {
+    await fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+/** A project config directory holding one JSONC payload, isolated per test. */
+async function configDir(name: string, payload: string): Promise<string> {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), `smart-compact-${name}-`));
+  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  writeFileSync(join(dir, ".opencode", "smart-compact.jsonc"), payload);
+  return dir;
+}
+
 interface HarnessOptions {
   /** Context window the stub model reports. */
   limitContext?: number;
@@ -622,4 +646,134 @@ test("an unknown window disables the derived emergency warning", async () => {
     });
   });
   assert.equal(warnings.some((line) => /emergency budget/.test(line)), false);
+});
+
+test("a configured cap warns on a 1M-token window and logs the capped denominator", async () => {
+  // The defect scenario: a 1M registry window made warnRatio unreachable, and
+  // the configured value was ignored because the registry had a limit. With
+  // the cap, 76% of 200000 = 152000 measured tokens must warn.
+  const dir = await configDir("cap-1m", '{"awareness": {"contextWindowTokens": 200000}}');
+  const h = await harness({ limitContext: 1_000_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const logs = await captureLogs(async () => {
+    await h.hook({
+      sessionID: "ses-cap-1m",
+      model: { providerID: "test", id: "model-x" },
+      system,
+      messages: [bigMessage(608_000)],
+    });
+  });
+  assert.equal(system.length, 1);
+  assert.match(system[0]!.text, /76%/);
+  assert.match(system[0]!.text, /200000/);
+  // The reminder says the denominator is a cap, and names the real window.
+  assert.match(system[0]!.text, /capped/i);
+  assert.match(system[0]!.text, /1000000/);
+  // Exactly one diagnostic line per fired reminder, carrying both numbers.
+  const fired = logs.filter((line) => /awareness .* fired/.test(line));
+  assert.equal(fired.length, 1);
+  assert.match(fired[0]!, /awareness warn fired: 152000\/200000 \(76%\) registry=1000000 capped=true/);
+  const state = h.storage.get("session:ses-cap-1m") as {
+    awarenessWindow?: number;
+    awarenessWindowSource?: unknown;
+    awarenessWindowRegistry?: number;
+    awarenessWindowCapped?: boolean;
+  };
+  assert.equal(state.awarenessWindow, 200_000);
+  assert.equal(state.awarenessWindowSource, "config");
+  assert.equal(state.awarenessWindowRegistry, 1_000_000);
+  assert.equal(state.awarenessWindowCapped, true);
+});
+
+test("absolute warnAtTokens fires on a 1M window that no ratio can reach", async () => {
+  // 150000 of a 1M window is 15%: far below warnRatio 0.5, yet the absolute
+  // line is the whole point of the feature.
+  const dir = await configDir("tokens-1m", '{"awareness": {"warnAtTokens": 150000}}');
+  const h = await harness({ limitContext: 1_000_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const event = {
+    sessionID: "ses-tokens-1m",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [bigMessage(600_000)],
+  };
+  const logs = await captureLogs(async () => {
+    await h.hook(event);
+  });
+  assert.equal(system.length, 1);
+  assert.match(system[0]!.text, /15%/);
+  assert.match(system[0]!.text, /150000/);
+  assert.match(system[0]!.text, /1000000/);
+  const fired = logs.filter((line) => /awareness .* fired/.test(line));
+  assert.equal(fired.length, 1);
+  assert.match(fired[0]!, /awareness warn fired: 150000\/1000000 \(15%\) registry=1000000 capped=false/);
+  const state = h.storage.get("session:ses-tokens-1m") as {
+    awarenessWindow?: number;
+    awarenessWindowCapped?: boolean;
+  };
+  // No cap was configured, so the registry window stands and nothing is capped.
+  assert.equal(state.awarenessWindow, 1_000_000);
+  assert.equal(state.awarenessWindowCapped, false);
+  // A repeat at the same fill holds the warn latch: no second nudge, no log.
+  const again = await captureLogs(async () => {
+    await h.hook(event);
+  });
+  assert.equal(system.length, 1);
+  assert.equal(again.filter((line) => /awareness .* fired/.test(line)).length, 0);
+});
+
+test("an absolute emergencyAtTokens escalates above a warn-only ratio", async () => {
+  const dir = await configDir(
+    "tokens-emergency",
+    '{"awareness": {"warnAtTokens": 150000, "emergencyAtTokens": 200000}}',
+  );
+  const h = await harness({ limitContext: 1_000_000, directory: dir });
+  const system: Array<{ type: string; text: string }> = [];
+  const logs = await captureLogs(async () => {
+    await h.hook({
+      sessionID: "ses-tokens-emergency",
+      model: { providerID: "test", id: "model-x" },
+      system,
+      messages: [bigMessage(800_000)],
+    });
+  });
+  // 200000 tokens is 20% of the window: a warn by ratio, an emergency by count.
+  assert.equal(system.length, 1);
+  assert.match(system[0]!.text, /COMPACT NOW/);
+  assert.equal(logs.filter((line) => /awareness emergency fired/.test(line)).length, 1);
+});
+
+test("the auto-trim log line is emitted once per queued trim", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  const base = { sessionID: "ses-trim-log", model: { providerID: "test", id: "model-x" }, system };
+  // 60 percent of the window: above the shipped 0.55 auto-trim line.
+  const first = await captureLogs(async () => {
+    await h.hook({ ...base, messages: [bigMessage(24000)] });
+  });
+  const queued = first.filter((line) => /auto-trim queued/.test(line));
+  assert.equal(queued.length, 1);
+  assert.match(queued[0]!, /auto-trim queued: 6000\/10000 \(60%\)/);
+  // The queued trim is consumed and the latch holds at the same fill, so the
+  // next request must not log another queue line.
+  const second = await captureLogs(async () => {
+    await h.hook({ ...base, messages: [bigMessage(24000)] });
+  });
+  assert.equal(second.filter((line) => /auto-trim queued/.test(line)).length, 0);
+});
+
+test("a quiet request logs no awareness line at all", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const system: Array<{ type: string; text: string }> = [];
+  const logs = await captureLogs(async () => {
+    await h.hook({
+      sessionID: "ses-quiet",
+      model: { providerID: "test", id: "model-x" },
+      system,
+      messages: [bigMessage(400)],
+    });
+  });
+  // 1 percent of the window: no fire, no queue, therefore no diagnostic line.
+  assert.equal(system.length, 0);
+  assert.equal(logs.filter((line) => /awareness .* fired|auto-trim queued/.test(line)).length, 0);
 });

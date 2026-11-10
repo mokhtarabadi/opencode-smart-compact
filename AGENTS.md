@@ -4,13 +4,13 @@
 
 Lossless, OpenCode V2-native context compaction. User messages stay verbatim, each old assistant turn is replaced by its own summary, and bulky tool output is pruned to a notice while the original is cached and retrievable via `read_omitted_content`. The agent can trigger compaction itself with the `compact_context` tool and read the resulting savings with `compact_stats` (shared logic in `src/actions.ts`).
 
-Stack: TypeScript ES2022, `@opencode/plugin` 2.0.22, strict `tsc --noEmit`. Entry `src/index.ts`. Modules: `actions.ts` (shared compaction actions for the commands and the `compact_context` tool), `apply.ts` (summary/omission application), `config.ts` (JSONC config merge), `plan.ts` (turn grouping/selection), `prune.ts` (tool-result pruning), `strategies.ts` (dedup/purge-errors), `summarize.ts` (per-turn summaries), `store.ts` (per-session state), `types.ts` (Msg, SessionState). No transcript mutation — transform model-visible messages per request via `session.hook("context")`.
+Stack: TypeScript ES2022, `@opencode/plugin` peer `>=2.0.28` (dev-pinned 2.0.22), strict `tsc --noEmit`. Entry `src/index.ts`. Modules: `actions.ts` (shared compaction actions for the commands and the `compact_context` tool), `apply.ts` (summary/omission application), `awareness.ts` (context-pressure measurement, window resolution, thresholds, reminder text), `config.ts` (JSONC config merge), `omissions.ts` (bounded on-disk original store), `plan.ts` (turn grouping/selection), `prune.ts` (tool-result pruning), `strategies.ts` (dedup/purge-errors), `summarize.ts` (per-turn summaries), `store.ts` (per-session state), `tokens.ts` (measurement path), `types.ts` (Msg, SessionState), `version.ts` (package version for stats). No transcript mutation — transform model-visible messages per request via `session.hook("context")`.
 
 ## Setup & Dev Commands
 
 - Install: `npm install`
 - Typecheck: `npm run typecheck` (`tsc --noEmit`)
-- Test: `npm run typecheck` (no unit suite yet)
+- Test: `npm test` (compiles `src` + `tests` via `tsc -p tsconfig.test.json`, then runs the suites with `node --test .test-build/tests/*.test.js`; 17 test files, 157 tests)
 - Dev: `opencode plugin add /absolute/path/to/opencode-smart-compact` or add dir to `plugins` in `opencode.json`
 
 ## Actionable Guardrails (Do's & Don'ts)

@@ -66,11 +66,31 @@ export interface AwarenessConfig {
    */
   autoTrimRatio: number;
   /**
-   * Fallback context window in tokens, used only when the model registry entry
-   * carries no usable `limit.context`. `0` (the default) keeps awareness
-   * silent for such a model instead of guessing a denominator.
+   * Fallback context window in tokens, and a HARD CAP when the model registry
+   * reports a larger window (`min(registry, configured)`). Used exactly as the
+   * denominator when the registry entry carries no usable `limit.context`.
+   * `0` (the default) means "not configured": the registry stands alone, and
+   * with no registry limit awareness stays silent rather than guessing.
+   *
+   * The cap exists because a ratio threshold is unreachable on a very large
+   * window: on a 1M-token model, `warnRatio 0.5` needs ~500K visible tokens,
+   * which pruning keeps out of reach, so the reminder and the auto-trim never
+   * fire. Capping the denominator makes the ratio meaningful again.
    */
   contextWindowTokens: number;
+  /**
+   * Absolute measured-token count that raises the first reminder. `0` (the
+   * default) disables the line. The fired level is the stronger of this and
+   * `warnRatio`, because a ratio alone cannot express "this session is already
+   * too big" when the window is a million tokens wide.
+   */
+  warnAtTokens: number;
+  /**
+   * Absolute measured-token count that raises the escalated reminder. `0`
+   * disables the line. When both absolute lines are set, the emergency one must
+   * not be smaller than the warn one.
+   */
+  emergencyAtTokens: number;
 }
 
 export interface SmartCompactConfig {
@@ -117,6 +137,8 @@ export const DEFAULT_CONFIG: SmartCompactConfig = {
     rearmStep: 0.05,
     autoTrimRatio: 0.55,
     contextWindowTokens: 0,
+    warnAtTokens: 0,
+    emergencyAtTokens: 0,
   },
 };
 
@@ -197,11 +219,18 @@ function isValidWindowTokens(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
+/** An absolute token threshold must be 0 (disabled) or a finite count. */
+function isValidTokenThreshold(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 /**
- * Merge the awareness section. Every key is validated on its own, and the
- * pair is checked together: an inverted warn/emergency pair would make the
- * escalation unreachable, so both fall back to the base values together.
- * Sibling keys survive a partial update.
+ * Merge the awareness section. Every key is validated on its own, and each
+ * threshold pair is checked together: an inverted warn/emergency pair would
+ * make the escalation unreachable, so both members of an inverted pair fall
+ * back to the base values together. The ratio pair and the absolute token pair
+ * are independent — arming one never resets the other. Sibling keys survive a
+ * partial update.
  */
 function mergeAwareness(
   base: AwarenessConfig,
@@ -227,31 +256,38 @@ function mergeAwareness(
       : isValidRatio(record.autoTrimRatio)
         ? record.autoTrimRatio
         : base.autoTrimRatio;
-  // 0 means "no configured denominator"; a positive integer is accepted.
+  // 0 means "no configured denominator"; a positive integer is accepted. A
+  // positive value is also a cap: see `resolveAwarenessWindow`.
   const contextWindowTokens =
     record.contextWindowTokens === 0
       ? 0
       : isValidWindowTokens(record.contextWindowTokens)
         ? record.contextWindowTokens
         : base.contextWindowTokens;
-  // Ordering guard: the warn threshold must stay below the emergency one.
-  if (warnRatio >= emergencyRatio) {
-    return {
-      enabled,
-      warnRatio: base.warnRatio,
-      emergencyRatio: base.emergencyRatio,
-      rearmStep,
-      autoTrimRatio,
-      contextWindowTokens,
-    };
-  }
+  // 0 is the shipped "line disabled" value, so it must survive the merge.
+  const warnAtTokens = isValidTokenThreshold(record.warnAtTokens)
+    ? record.warnAtTokens
+    : base.warnAtTokens;
+  const emergencyAtTokens = isValidTokenThreshold(record.emergencyAtTokens)
+    ? record.emergencyAtTokens
+    : base.emergencyAtTokens;
+  // Ordering guards, one per pair. A pair is only inverted when both members
+  // are armed; a warn line alone (emergency 0 = disabled) is valid.
+  const ratiosOrdered = !(warnRatio >= emergencyRatio);
+  const tokensOrdered = !(
+    warnAtTokens > 0 &&
+    emergencyAtTokens > 0 &&
+    emergencyAtTokens < warnAtTokens
+  );
   return {
     enabled,
-    warnRatio,
-    emergencyRatio,
+    warnRatio: ratiosOrdered ? warnRatio : base.warnRatio,
+    emergencyRatio: ratiosOrdered ? emergencyRatio : base.emergencyRatio,
     rearmStep,
     autoTrimRatio,
     contextWindowTokens,
+    warnAtTokens: tokensOrdered ? warnAtTokens : base.warnAtTokens,
+    emergencyAtTokens: tokensOrdered ? emergencyAtTokens : base.emergencyAtTokens,
   };
 }
 
@@ -398,6 +434,8 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
     "rearmStep",
     "autoTrimRatio",
     "contextWindowTokens",
+    "warnAtTokens",
+    "emergencyAtTokens",
   ],
 };
 
@@ -521,6 +559,29 @@ export function validateAwareness(raw: unknown): string[] {
   ) {
     warnings.push(
       "Invalid config value: awareness.contextWindowTokens must be 0 or a positive whole number of tokens",
+    );
+  }
+  const warnAtTokens = record.warnAtTokens;
+  const emergencyAtTokens = record.emergencyAtTokens;
+  if (warnAtTokens !== undefined && !isValidTokenThreshold(warnAtTokens)) {
+    warnings.push(
+      "Invalid config value: awareness.warnAtTokens must be 0 (disabled) or a finite token count",
+    );
+  }
+  if (emergencyAtTokens !== undefined && !isValidTokenThreshold(emergencyAtTokens)) {
+    warnings.push(
+      "Invalid config value: awareness.emergencyAtTokens must be 0 (disabled) or a finite token count",
+    );
+  }
+  if (
+    isValidTokenThreshold(warnAtTokens) &&
+    isValidTokenThreshold(emergencyAtTokens) &&
+    warnAtTokens > 0 &&
+    emergencyAtTokens > 0 &&
+    emergencyAtTokens < warnAtTokens
+  ) {
+    warnings.push(
+      "Invalid config value: awareness.warnAtTokens must not exceed awareness.emergencyAtTokens when both are set",
     );
   }
   if (

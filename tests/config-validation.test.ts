@@ -98,6 +98,8 @@ test("awareness defaults are on, with auto-trim armed and no configured window",
     rearmStep: 0.05,
     autoTrimRatio: 0.55,
     contextWindowTokens: 0,
+    warnAtTokens: 0,
+    emergencyAtTokens: 0,
   });
   assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
 });
@@ -131,6 +133,62 @@ test("validateConfig accepts the fallback window and rejects impossible values",
   assert.ok(badWindow.some((w) => w.includes("awareness.contextWindowTokens")));
   const fractional = validateConfig({ awareness: { contextWindowTokens: 1.5 } });
   assert.ok(fractional.some((w) => w.includes("awareness.contextWindowTokens")));
+});
+
+test("validateConfig range-checks the absolute token thresholds", () => {
+  // 0 disables each line, a positive number arms it, and the pair may be set
+  // independently (a warn line alone is a valid configuration).
+  assert.deepEqual(validateConfig({ awareness: { warnAtTokens: 0, emergencyAtTokens: 0 } }), []);
+  assert.deepEqual(validateConfig({ awareness: { warnAtTokens: 150_000 } }), []);
+  assert.deepEqual(validateConfig({ awareness: { emergencyAtTokens: 400_000 } }), []);
+  assert.deepEqual(validateConfig({ awareness: { warnAtTokens: 150_000, emergencyAtTokens: 400_000 } }), []);
+  const negative = validateConfig({ awareness: { warnAtTokens: -1 } });
+  assert.ok(negative.some((w) => w.includes("awareness.warnAtTokens")));
+  const notFinite = validateConfig({ awareness: { emergencyAtTokens: Number.POSITIVE_INFINITY } });
+  assert.ok(notFinite.some((w) => w.includes("awareness.emergencyAtTokens")));
+  const notNumber = validateConfig({ awareness: { warnAtTokens: "150000" } });
+  assert.ok(notNumber.some((w) => w.includes("awareness.warnAtTokens")));
+  // An inverted pair would make the escalation unreachable.
+  const inverted = validateConfig({ awareness: { warnAtTokens: 500_000, emergencyAtTokens: 400_000 } });
+  assert.ok(inverted.some((w) => w.includes("awareness.warnAtTokens")));
+  // Equal lines are not inverted: the stronger wins at the same count.
+  assert.deepEqual(validateConfig({ awareness: { warnAtTokens: 400_000, emergencyAtTokens: 400_000 } }), []);
+});
+
+test("loadConfig keeps a valid absolute threshold and drops an inverted pair", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadConfig } = await import("../src/config.js");
+  const good = mkdtempSync(join(tmpdir(), "smart-compact-token-lines-"));
+  mkdirSync(join(good, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(good, ".opencode", "smart-compact.jsonc"),
+    '{"awareness": {"contextWindowTokens": 200000, "warnAtTokens": 150000}}',
+  );
+  const config = await loadConfig({ location: { directory: good } } as never);
+  assert.equal(config.awareness.contextWindowTokens, 200_000);
+  assert.equal(config.awareness.warnAtTokens, 150_000);
+  assert.equal(config.awareness.emergencyAtTokens, 0);
+  // Siblings survive: the cap does not reset the ratios.
+  assert.equal(config.awareness.warnRatio, 0.5);
+
+  const bad = mkdtempSync(join(tmpdir(), "smart-compact-token-lines-bad-"));
+  mkdirSync(join(bad, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(bad, ".opencode", "smart-compact.jsonc"),
+    '{"awareness": {"warnAtTokens": 500000, "emergencyAtTokens": 400000}}',
+  );
+  const original = console.warn;
+  console.warn = () => {};
+  try {
+    const dropped = await loadConfig({ location: { directory: bad } } as never);
+    // Both lines fall back together: an inverted pair must not survive.
+    assert.equal(dropped.awareness.warnAtTokens, 0);
+    assert.equal(dropped.awareness.emergencyAtTokens, 0);
+  } finally {
+    console.warn = original;
+  }
 });
 
 test("validateConfig range-checks the window-scaled budget ratio", () => {

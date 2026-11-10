@@ -159,10 +159,25 @@ export function formatStats(state: SessionState): string {
     typeof state?.awarenessModel === "string" && state.awarenessModel.length > 0
       ? state.awarenessModel
       : "no model seen yet";
-  const configured = state?.awarenessWindowSource === "config" ? " — configured" : "";
+  // Provenance suffix, appended to the same parenthetical so the one-line shape
+  // other tooling parses stays intact: a configured denominator is labelled
+  // `configured`, and a denominator the config CAPPED also names the registry
+  // window it reduced, so an operator can tell the two cases apart.
+  const registryTokens =
+    typeof state?.awarenessWindowRegistry === "number" &&
+    Number.isFinite(state.awarenessWindowRegistry) &&
+    state.awarenessWindowRegistry > 0
+      ? Math.floor(state.awarenessWindowRegistry)
+      : 0;
+  const configured =
+    state?.awarenessWindowSource === "config" ? " — configured" : "";
+  const capped =
+    state?.awarenessWindowCapped === true && registryTokens > 0
+      ? `, capped from ${registryTokens}`
+      : "";
   const windowPart =
     windowTokens > 0
-      ? `window ${windowTokens} (${modelName}${configured})`
+      ? `window ${windowTokens} (${modelName}${configured}${capped})`
       : `window unknown (${modelName} — awareness off)`;
   return (
     `[smart-compact] version ${PLUGIN_VERSION}; pruned ~${prunedTokens} tokens across ${prunedParts} tool results; ` +

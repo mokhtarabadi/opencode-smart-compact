@@ -4,6 +4,9 @@ import {
   autoTrimResetLine,
   buildAwarenessMessage,
   getAwarenessLevel,
+  getAwarenessTokenLevel,
+  getEffectiveAwarenessLevel,
+  isBelowAwarenessRearmLine,
   measureVisibleTokens,
   resolveAwarenessWindow,
   resolveContextLimit,
@@ -66,28 +69,70 @@ test("resolveContextLimit returns undefined for a miss or an unusable limit", ()
   );
 });
 
-test("resolveAwarenessWindow prefers the registry and names its source", () => {
+test("resolveAwarenessWindow uses the registry alone when nothing is configured", () => {
+  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 200_000 } }];
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 0), {
+    limitTokens: 200_000,
+    source: "registry",
+    registryTokens: 200_000,
+    capped: false,
+  });
+});
+
+test("resolveAwarenessWindow falls back to the configured window when the registry has none", () => {
+  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 0 } }];
+  // No registry number exists at all, so `registryTokens` is absent and the
+  // configured value is the denominator exactly, not a cap on anything.
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 150_000), {
+    limitTokens: 150_000,
+    source: "config",
+    capped: false,
+  });
+  // A configured value of 0 or a malformed value is "not configured".
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, 0), { capped: false });
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, Number.NaN), {
+    capped: false,
+  });
+});
+
+test("resolveAwarenessWindow caps a larger registry window with the configured value", () => {
+  // The defect: a 1M-token window made warnRatio unreachable, and the
+  // configured value was ignored whenever the registry had a limit. A smaller
+  // configured value now wins as a hard cap, and both numbers are reported so
+  // the caller can say the denominator was capped rather than measured.
+  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 1_000_000 } }];
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 200_000), {
+    limitTokens: 200_000,
+    source: "config",
+    registryTokens: 1_000_000,
+    capped: true,
+  });
+});
+
+test("resolveAwarenessWindow keeps the registry when the configured value is larger", () => {
+  // A configured value above the real window cannot be a cap: it would demand
+  // more context than the model accepts.
   const models = [{ providerID: "opencode", id: "model-a", limit: { context: 200_000 } }];
   assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 500_000), {
     limitTokens: 200_000,
     source: "registry",
+    registryTokens: 200_000,
+    capped: false,
+  });
+  // Equal numbers are not a cap either: nothing was reduced.
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 200_000), {
+    limitTokens: 200_000,
+    source: "registry",
+    registryTokens: 200_000,
+    capped: false,
   });
 });
 
-test("resolveAwarenessWindow falls back to the configured window", () => {
-  const models = [{ providerID: "opencode", id: "model-a", limit: { context: 0 } }];
-  assert.deepEqual(resolveAwarenessWindow({ providerID: "opencode", id: "model-a" }, models, 150_000), {
-    limitTokens: 150_000,
-    source: "config",
+test("resolveAwarenessWindow stays silent when neither source exists", () => {
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], 0), { capped: false });
+  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], undefined), {
+    capped: false,
   });
-  // A configured value of 0 or a malformed value is "not configured".
-  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, 0), {});
-  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, models, Number.NaN), {});
-});
-
-test("resolveAwarenessWindow stays empty when neither source exists", () => {
-  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], 0), {});
-  assert.deepEqual(resolveAwarenessWindow({ providerID: "x", id: "y" }, [], undefined as never), {});
 });
 
 test("getAwarenessLevel maps the ratio to none, warn, and emergency", () => {
@@ -231,4 +276,106 @@ test("autoTrimResetLine never lands at or below zero", () => {
   // Disabled or malformed input resets at zero.
   assert.equal(autoTrimResetLine(0, 0.05), 0);
   assert.equal(autoTrimResetLine(Number.NaN, 0.05), 0);
+});
+
+test("getAwarenessTokenLevel maps absolute token counts and stays off at zero", () => {
+  const cfg = { warnAtTokens: 150_000, emergencyAtTokens: 400_000 };
+  assert.equal(getAwarenessTokenLevel(149_999, cfg), "none");
+  assert.equal(getAwarenessTokenLevel(150_000, cfg), "warn");
+  assert.equal(getAwarenessTokenLevel(399_999, cfg), "warn");
+  assert.equal(getAwarenessTokenLevel(400_000, cfg), "emergency");
+  // 0 means "this absolute threshold is disabled", the shipped default.
+  assert.equal(getAwarenessTokenLevel(10_000_000, { warnAtTokens: 0, emergencyAtTokens: 0 }), "none");
+  // Only the emergency line set: warn stays disabled, emergency still fires.
+  assert.equal(getAwarenessTokenLevel(999_999, { warnAtTokens: 0, emergencyAtTokens: 400_000 }), "emergency");
+  // A malformed measurement never raises a reminder.
+  assert.equal(getAwarenessTokenLevel(Number.NaN, cfg), "none");
+  assert.equal(getAwarenessTokenLevel(-1, cfg), "none");
+  assert.equal(getAwarenessTokenLevel(Number.POSITIVE_INFINITY, cfg), "none");
+});
+
+test("getEffectiveAwarenessLevel takes the stronger of the ratio and token levels", () => {
+  const cfg = {
+    warnRatio: 0.5,
+    emergencyRatio: 0.8,
+    warnAtTokens: 150_000,
+    emergencyAtTokens: 400_000,
+  };
+  // Ratio alone: 60% of a 1M window is 600K tokens, which is also emergency.
+  assert.equal(getEffectiveAwarenessLevel(600_000, 0.6, cfg), "emergency");
+  // Token alone: 15% of a 1M window is a warn because of the absolute line.
+  assert.equal(getEffectiveAwarenessLevel(160_000, 0.16, cfg), "warn");
+  // Emergency tokens win over a warn ratio (40% of a 1M window).
+  assert.equal(getEffectiveAwarenessLevel(400_000, 0.4, cfg), "emergency");
+  // Neither signal crossed.
+  assert.equal(getEffectiveAwarenessLevel(100_000, 0.1, cfg), "none");
+  // Both absolute thresholds disabled: identical to the ratio path.
+  const ratioOnly = { ...cfg, warnAtTokens: 0, emergencyAtTokens: 0 };
+  assert.equal(getEffectiveAwarenessLevel(900_000, 0.9, ratioOnly), "emergency");
+  assert.equal(getEffectiveAwarenessLevel(900_000, 0.4, ratioOnly), "none");
+});
+
+test("isBelowAwarenessRearmLine requires every armed signal to be below its line", () => {
+  const cfg = { warnRatio: 0.5, warnAtTokens: 150_000, rearmStep: 0.05 };
+  // 10 percent below a 45 percent ratio clear line, and below the token line.
+  assert.equal(isBelowAwarenessRearmLine({ usedTokens: 40_000, ratio: 0.1, cfg }), true);
+  // Hovering just under the ratio line is not enough: the latch must hold.
+  assert.equal(isBelowAwarenessRearmLine({ usedTokens: 40_000, ratio: 0.46, cfg }), false);
+  // The ratio dropped but the token count still sits near the absolute line
+  // (149K of a 150K line): the token signal has not re-armed yet.
+  assert.equal(isBelowAwarenessRearmLine({ usedTokens: 149_000, ratio: 0.46, cfg }), false);
+  // Token line minus one re-arm step (150K * 0.95 = 142500) clears it.
+  assert.equal(isBelowAwarenessRearmLine({ usedTokens: 142_400, ratio: 0.1, cfg }), true);
+  // With the absolute line disabled only the ratio decides.
+  const ratioOnly = { ...cfg, warnAtTokens: 0 };
+  assert.equal(isBelowAwarenessRearmLine({ usedTokens: 900_000, ratio: 0.1, cfg: ratioOnly }), true);
+  // Without an armed line and without a usable step nothing clears a latch.
+  assert.equal(
+    isBelowAwarenessRearmLine({ usedTokens: 0, ratio: 0.1, cfg: { warnRatio: 0.05, warnAtTokens: 0, rearmStep: 0.05 } }),
+    false,
+  );
+});
+
+test("buildAwarenessMessage explains a capped denominator instead of a missing limit", () => {
+  const text = buildAwarenessMessage({
+    usedTokens: 152_000,
+    limitTokens: 200_000,
+    ratioPct: 76,
+    level: "warn",
+    windowSource: "config",
+    registryTokens: 1_000_000,
+    capped: true,
+  });
+  assert.match(text, /76%/);
+  // The cap must be described as a cap, not as a registry that carries no limit.
+  assert.match(text, /capped/i);
+  assert.match(text, /1000000/);
+  assert.equal(/carries no `limit\.context`/.test(text), false);
+});
+
+test("buildAwarenessMessage names an absolute token line as the reason", () => {
+  const text = buildAwarenessMessage({
+    usedTokens: 150_000,
+    limitTokens: 1_000_000,
+    ratioPct: 15,
+    level: "warn",
+    windowSource: "registry",
+    registryTokens: 1_000_000,
+    capped: false,
+    absoluteTriggered: true,
+  });
+  // A warn at 15 percent needs its reason stated, or the agent cannot tell why.
+  assert.match(text, /awareness\.warnAtTokens/);
+  assert.match(text, /150000 measured tokens/);
+  // A ratio-triggered reminder must not carry the absolute note.
+  const ratioOnly = buildAwarenessMessage({
+    usedTokens: 600_000,
+    limitTokens: 1_000_000,
+    ratioPct: 60,
+    level: "warn",
+    windowSource: "registry",
+    registryTokens: 1_000_000,
+    capped: false,
+  });
+  assert.equal(/warnAtTokens/.test(ratioOnly), false);
 });

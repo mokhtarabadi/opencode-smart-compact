@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-11-10
+
+### Fixed
+
+- Context-pressure awareness was dead on large-window models: `resolveAwarenessWindow` (`src/awareness.ts`) always preferred the registry `limit.context` and consulted `awareness.contextWindowTokens` only when the registry had no limit, so on a 1,000,000-token model with `warnRatio 0.5` the first reminder needed ~500,000 visible tokens. A verified ~10 hour session (9.7M characters of transcript) produced zero reminders and zero automatic trims, and its session state carried no `awarenessLastRatio`, `awarenessLastLevel`, or `autoTrimLastRatio` at all. Task 62.
+
+### Changed
+
+- **`awareness.contextWindowTokens` is now a HARD CAP** on the denominator: the effective window is `min(registry, configured)`. When the registry has no usable limit the configured value is the denominator exactly as before, and when neither exists awareness still stays silent. `ResolvedWindow` reports both numbers (`registryTokens`, `capped`), the reminder says the denominator was capped and names the registry window instead of claiming a missing `limit.context`, and `compact_stats` appends `, capped from <registry tokens>` to the existing one-line window field. Task 62.
+- The resolved cap also lowers the derived emergency budget (`tokens.emergencyBudgetRatio` of the effective window), because both thresholds share one denominator per request. Task 62.
+- Awareness diagnostics are now per event, never per request: exactly one `[smart-compact] awareness <level> fired: <used>/<limit> (<pct>%) registry=<n> capped=<bool>` line per fired reminder and one `[smart-compact] auto-trim queued: …` line per queued trim. A request that neither fires nor queues logs nothing. Task 62.
+- `AGENTS.md` corrected: the test command is `npm test` (17 suites through `node --test`), not `npm run typecheck`, and the module list no longer omits `awareness.ts`, `omissions.ts`, `tokens.ts`, and `version.ts`.
+
+### Added
+
+- `awareness.warnAtTokens` and `awareness.emergencyAtTokens`: absolute thresholds in measured tokens (`0` = disabled, the shipped default) for windows where a percentage is unreachable. The fired level is the stronger of the ratio level and the token level; both halves are separate pure functions (`getAwarenessLevel`, `getAwarenessTokenLevel`) combined by `getEffectiveAwarenessLevel`, `isBelowAwarenessRearmLine` keeps hysteresis honest by requiring every armed signal to clear its own line, and the reminder states when an absolute line is the reason so a low percentage is never unexplained. Validation accepts finite non-negative numbers and rejects an inverted pair (emergency below warn) with a warning, falling both back to the defaults. Task 62.
+- `awarenessWindowRegistry` / `awarenessWindowCapped` persisted in session state (whitelisted in `loadState`, so they survive a reload) to back the stats suffix. Task 62.
+
 ## [Unreleased]
 
 ### Fixed

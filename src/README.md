@@ -6,7 +6,7 @@ Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, 
 
 - `index.ts` — setup, runPrune, measureVisibleCost, notify, per-request window resolution, runAwareness. No transcript mutation.
 - `actions.ts` — shared `compactNow`, `scheduleTrim`, `parseCompactArgs`, stats/budget/pointer formatters. Single source so tool + commands cannot drift.
-- `awareness.ts` — context-pressure awareness: pure measurement of the model-visible messages, registry/configured window resolution, threshold and latch decision, agent-facing reminder text. No I/O, no state.
+- `awareness.ts` — context-pressure awareness: pure measurement of the model-visible messages, window resolution (registry, configured fallback, configured cap), ratio and absolute-token thresholds, latch decision, agent-facing reminder text. No I/O, no state.
 - `plan.ts` — `buildTurns` groups history by user boundary, `selectTurns` excludes recent window.
 - `summarize.ts` — batched `summarizeTurns` via `ctx.generate.text`, `<summary id>` parse, heuristic fallback counter.
 - `prune.ts` — `pruneToolResults`, `applyOmissions`, rank, truncate caps, discard/protected rules; writes originals to the omission store.
@@ -26,3 +26,5 @@ Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, 
 - Awareness is advisory: it reminds, it never compacts, never aborts a step, never mutates history. Auto-trim is the one automatic action and is lossless; it is armed at `autoTrimRatio 0.55` by default with the existing one-trim-per-period latch.
 - Session state never holds full tool-output originals: they live in the bounded file store under the plugin data dir, and every retrieval is capped at 20000 characters.
 - Thresholds that depend on the window resolve through one `resolveAwarenessWindow` call per request, so the emergency budget and the awareness ratio cannot use different denominators.
+- `awareness.contextWindowTokens` caps a larger registry window (`min(registry, configured)`) instead of being a registry-miss-only fallback, and `warnAtTokens` / `emergencyAtTokens` add absolute lines because a ratio is unreachable on a very large window. The fired level is the stronger of the two signals.
+- Diagnostics are per event, never per request: one `awareness <level> fired: <used>/<limit> (<pct>%) registry=<n> capped=<bool>` line per reminder and one `auto-trim queued: …` line per queued trim.

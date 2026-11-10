@@ -106,16 +106,50 @@ export type WindowSource = "registry" | "config";
 export interface ResolvedWindow {
   /** Effective window in tokens, or absent when neither source exists. */
   limitTokens?: number;
-  /** `registry` when `limit.context` supplied it, `config` for the fallback. */
+  /**
+   * `registry` when `limit.context` supplied the effective number, `config`
+   * when a configured value did — either as the fallback (registry has no
+   * limit) or as a cap on a larger registry window.
+   */
   source?: WindowSource;
+  /**
+   * The registry's own number, present whenever the registry entry carries a
+   * usable `limit.context`. Reported alongside the effective window so a caller
+   * can say "capped" instead of silently measuring against a smaller number.
+   */
+  registryTokens?: number;
+  /**
+   * True only when a positive `awareness.contextWindowTokens` reduced a larger
+   * registry window. A configured value that is equal to, larger than, or the
+   * only source of the denominator is not a cap.
+   */
+  capped: boolean;
+}
+
+/** Absolute token thresholds, both `0` when disabled. */
+export interface AwarenessTokenThresholds {
+  /** Measured tokens that raise the first reminder. `0` disables the line. */
+  warnAtTokens?: number;
+  /** Measured tokens that raise the escalated reminder. `0` disables the line. */
+  emergencyAtTokens?: number;
 }
 
 /**
- * Resolve the window a session is measured against: the model registry first,
- * then the configured `awareness.contextWindowTokens` fallback. The fallback is
- * used only when the registry entry is missing or carries no usable limit, so
- * a provider that omits `limit.context` still gets a pressure ratio — and the
- * reminder can say the denominator is configured rather than measured.
+ * Resolve the window a session is measured against.
+ *
+ * The registry `limit.context` is the real capacity, but a ratio threshold on a
+ * very large window is unreachable in practice: on a 1,000,000-token model,
+ * `warnRatio 0.5` needs ~500,000 visible tokens, which the plugin's own pruning
+ * keeps out of reach forever. A positive `awareness.contextWindowTokens`
+ * therefore acts as a HARD CAP — `min(registry, configured)` — so an operator
+ * can pick a working range for a model whose advertised window is far larger
+ * than any session should reach. The cap is reported (`capped`, plus the
+ * registry number) so the reminder, the stats line, and the logs can say the
+ * denominator is a cap rather than a measured limit.
+ *
+ * With no registry limit the configured value is the denominator exactly; with
+ * neither source the result carries no window and the caller stays silent
+ * instead of guessing.
  */
 export function resolveAwarenessWindow(
   modelRef: { providerID: string; id: string },
@@ -123,15 +157,118 @@ export function resolveAwarenessWindow(
   configuredTokens?: number,
 ): ResolvedWindow {
   const registry = resolveContextLimit(modelRef, models);
-  if (registry !== undefined) return { limitTokens: registry, source: "registry" };
-  if (
+  const configured =
     typeof configuredTokens === "number" &&
     Number.isFinite(configuredTokens) &&
     configuredTokens > 0
+      ? Math.floor(configuredTokens)
+      : undefined;
+  // The configured value only caps when it is strictly smaller: an equal value
+  // reduces nothing, and a larger one would demand more context than the model
+  // accepts.
+  if (
+    registry !== undefined &&
+    configured !== undefined &&
+    configured < registry
   ) {
-    return { limitTokens: Math.floor(configuredTokens), source: "config" };
+    return {
+      limitTokens: configured,
+      source: "config",
+      registryTokens: registry,
+      capped: true,
+    };
   }
-  return {};
+  if (registry !== undefined) {
+    return {
+      limitTokens: registry,
+      source: "registry",
+      registryTokens: registry,
+      capped: false,
+    };
+  }
+  if (configured !== undefined) return { limitTokens: configured, source: "config", capped: false };
+  return { capped: false };
+}
+
+/**
+ * The pressure level for an absolute token count. `emergency` wins over `warn`;
+ * a count below both lines is `none`. A `0` line is disabled, and a malformed
+ * measurement never raises a reminder.
+ *
+ * This is the second half of the threshold decision, kept separate from
+ * `getAwarenessLevel` so both are unit-testable in isolation: ratios are
+ * meaningless on a 1M-token window, so an install can arm an absolute count
+ * (for example 150,000 tokens) and be warned there regardless of percentage.
+ */
+export function getAwarenessTokenLevel(
+  usedTokens: number,
+  cfg: AwarenessTokenThresholds,
+): AwarenessLevel {
+  if (!Number.isFinite(usedTokens) || usedTokens < 0) return "none";
+  const emergency = cfg?.emergencyAtTokens;
+  if (
+    typeof emergency === "number" &&
+    Number.isFinite(emergency) &&
+    emergency > 0 &&
+    usedTokens >= emergency
+  ) {
+    return "emergency";
+  }
+  const warn = cfg?.warnAtTokens;
+  if (typeof warn === "number" && Number.isFinite(warn) && warn > 0 && usedTokens >= warn) {
+    return "warn";
+  }
+  return "none";
+}
+
+/**
+ * The level a request actually fires at: the stronger of the ratio level and
+ * the absolute token level. Two independent signals, one outcome, so an install
+ * can arm both (a ratio for small windows, an absolute count for large ones)
+ * without the weaker one masking the stronger.
+ */
+export function getEffectiveAwarenessLevel(
+  usedTokens: number,
+  ratio: number,
+  cfg: { warnRatio: number; emergencyRatio: number } & AwarenessTokenThresholds,
+): AwarenessLevel {
+  const ratioLevel = getAwarenessLevel(ratio, cfg);
+  const tokenLevel = getAwarenessTokenLevel(usedTokens, cfg);
+  if (ratioLevel === "emergency" || tokenLevel === "emergency") return "emergency";
+  if (ratioLevel === "warn" || tokenLevel === "warn") return "warn";
+  return "none";
+}
+
+/**
+ * Whether the pressure has fallen far enough below the warn line for the
+ * reminder latch to be cleared.
+ *
+ * Every armed signal must clear its own line, otherwise a request that trips
+ * the absolute token line would keep the latch of a ratio warning alive (or the
+ * reverse) and the next crossing could not warn. The ratio line is the
+ * historical `warnRatio - rearmStep`. The token line uses the same re-arm step
+ * as a RELATIVE margin (`warnAtTokens * (1 - rearmStep)`), because `rearmStep`
+ * is a fraction and a token margin must scale with the line it guards. With the
+ * token line disabled only the ratio decides. A zero or invalid step leaves
+ * nothing to clear against, mirroring `autoTrimResetLine`: the latch holds
+ * rather than clearing on every request.
+ */
+export function isBelowAwarenessRearmLine(args: {
+  usedTokens: number;
+  ratio: number;
+  cfg: { warnRatio: number; warnAtTokens?: number; rearmStep: number };
+}): boolean {
+  const { usedTokens, ratio, cfg } = args;
+  const step =
+    typeof cfg?.rearmStep === "number" && Number.isFinite(cfg.rearmStep) && cfg.rearmStep > 0
+      ? cfg.rearmStep
+      : 0;
+  const ratioLine = cfg.warnRatio - step;
+  if (!Number.isFinite(ratio) || !(ratio < ratioLine)) return false;
+  const tokenLine = cfg.warnAtTokens;
+  if (typeof tokenLine !== "number" || !Number.isFinite(tokenLine) || tokenLine <= 0) return true;
+  if (!Number.isFinite(usedTokens)) return false;
+  return usedTokens < tokenLine * (1 - step);
 }
 
 /**
@@ -237,8 +374,19 @@ export function buildAwarenessMessage(args: {
   level: AwarenessWarnLevel;
   /** How the denominator was obtained; `config` is called out explicitly. */
   windowSource?: WindowSource;
+  /** The registry's own window, when it carried a usable `limit.context`. */
+  registryTokens?: number;
+  /** True when `awareness.contextWindowTokens` reduced a larger registry window. */
+  capped?: boolean;
+  /**
+   * True when the reminder was raised by an absolute token line while the
+   * ratio is below the ratio warn line. Without this note an agent reads
+   * "emergency" at 15 percent and cannot tell why.
+   */
+  absoluteTriggered?: boolean;
 }): string {
-  const { usedTokens, limitTokens, ratioPct, level, windowSource } = args;
+  const { usedTokens, limitTokens, ratioPct, level, windowSource, registryTokens, capped, absoluteTriggered } =
+    args;
   const isEmergency = level === "emergency";
   const status = isEmergency
     ? "emergency context pressure - immediate action required"
@@ -246,15 +394,30 @@ export function buildAwarenessMessage(args: {
   const firstLine = isEmergency
     ? "COMPACT NOW — search your tool list for `compact_context` and call it immediately."
     : "ACT NOW — search your tool list for `compact_context` and call it before continuing.";
+  // A capped denominator is not a missing limit: the operator deliberately
+  // shrank it, so say so and name the real window instead of claiming the
+  // registry has no `limit.context`.
+  const capNote =
+    capped === true && typeof registryTokens === "number" && registryTokens > 0
+      ? `\nDenominator note: the model registry reports a ${registryTokens}-token window, and \`awareness.contextWindowTokens\` caps the denominator at ${limitTokens} (capped=true, by operator configuration). The percentage is a fraction of that cap, while the token counts are the real measure.\n`
+      : "";
   const configuredNote =
-    windowSource === "config"
+    capped !== true && windowSource === "config"
       ? `\nDenominator note: the model registry carries no \`limit.context\` for this model, so ${limitTokens} is the configured \`awareness.contextWindowTokens\` value. Treat the percentage as approximate.\n`
+      : "";
+  const note = capNote || configuredNote;
+  // Absolute lines exist because a ratio is unreachable on a huge window, so a
+  // reminder at a low percentage is correct but needs its reason stated.
+  const absoluteNote =
+    absoluteTriggered === true
+      ? `\nThreshold note: this reminder was raised by an absolute token line (\`awareness.warnAtTokens\` / \`awareness.emergencyAtTokens\`) at ${usedTokens} measured tokens, not by the percentage of the window. The token counts above are the real measure; the percentage is low only because the window is large.\n`
       : "";
   const lines: string[] = [
     firstLine,
     "",
     `[smart-compact] CONTEXT PRESSURE - ${ratioPct}% of the context window is in use (about ${usedTokens} of ${limitTokens} measured tokens).`,
-    ...(configuredNote ? [configuredNote] : []),
+    ...(note ? [note] : []),
+    ...(absoluteNote ? [absoluteNote] : []),
     `Status: ${status}. The measured fill is a lower bound: it counts only the model-visible messages, while provider system prompts and tool schemas are invisible to the plugin, so the true usage is higher than this number.`,
     "",
     "If you ignore this and the session overflows, in-flight work is dropped and cannot be recovered. Do not let sessions or turns silently overflow.",
