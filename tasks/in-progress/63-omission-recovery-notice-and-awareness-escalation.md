@@ -137,7 +137,5 @@ User messages were already safe: the prune pass only ever touches `tool-result` 
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-
-_(Git diff will be automatically injected here by the MCP tool. Do not edit this block manually)_
-
+**Factual Git Diff:** Stored in Commit Hash: `b490bb1c2062156ff3e79877fa00da70d6e743a3`
 <!-- END_GIT_DIFF -->
