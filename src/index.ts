@@ -20,7 +20,7 @@ import {
   measureVisibleTokens,
   resolveAwarenessWindow,
   shouldAutoTrim,
-  shouldFireAwareness,
+  shouldFireAwarenessReminder,
   type AwarenessModel,
   type ResolvedWindow,
 } from "./awareness.js";
@@ -336,19 +336,18 @@ async function runAwareness(
     }
     // Emergency re-fires on every request while the pressure stays at or
     // above the emergency line: a heads-down agent must not get one nudge and
-    // then silence. The single-shot latch below applies to warn only; the
-    // hysteresis clear above still clears both levels once the pressure drops.
-    if (level !== "emergency") {
-      if (
-        !shouldFireAwareness(
-          ratio,
-          level,
-          { lastRatio: state.awarenessLastRatio, lastLevel: state.awarenessLastLevel },
-          awareness.rearmStep,
-        )
-      ) {
-        return;
-      }
+    // then silence. The single-shot latch applies to warn only; the hysteresis
+    // clear above still clears both levels once the pressure drops, so the
+    // message never oscillates between levels.
+    if (
+      !shouldFireAwarenessReminder(
+        ratio,
+        level,
+        { lastRatio: state.awarenessLastRatio, lastLevel: state.awarenessLastLevel },
+        awareness.rearmStep,
+      )
+    ) {
+      return;
     }
     const text = buildAwarenessMessage({
       usedTokens,
@@ -439,13 +438,11 @@ export default Plugin.define({
           if (!contentId) return { content: "Missing contentId." };
           const state = await loadState(ctx, context.sessionID);
           const record = state.omissions[contentId];
-          if (!record) {
-            return {
-              content:
-                `No omitted content found for Content ID: ${contentId} in this session. ` +
-                `It was cleared by a newer compaction — rerun the tool to reproduce the output instead of trusting a restore.`,
-            };
-          }
+          // Fail closed on both lanes: an unknown id and a known record whose
+          // original was evicted answer with the same explicit missing notice,
+          // so the two paths cannot drift and no caller ever gets a phantom
+          // restore.
+          if (!record) return { content: missingOmissionNotice(contentId) };
           const original = readOmissionOriginal(record);
           // Fail closed: a mapped record without a readable original (evicted
           // file, or a cache cleared by a newer compaction) names the missing

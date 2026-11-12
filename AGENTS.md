@@ -10,7 +10,7 @@ Stack: TypeScript ES2022, `@opencode/plugin` peer `>=2.0.28` (dev-pinned 2.0.22)
 
 - Install: `npm install`
 - Typecheck: `npm run typecheck` (`tsc --noEmit`)
-- Test: `npm test` (compiles `src` + `tests` via `tsc -p tsconfig.test.json`, then runs the suites with `node --test .test-build/tests/*.test.js`; 17 test files, 157 tests)
+- Test: `npm test` (compiles `src` + `tests` via `tsc -p tsconfig.test.json`, then runs the suites with `node --test .test-build/tests/*.test.js`; 18 test files, 172 tests)
 - Dev: `opencode plugin add /absolute/path/to/opencode-smart-compact` or add dir to `plugins` in `opencode.json`
 
 ## Actionable Guardrails (Do's & Don'ts)

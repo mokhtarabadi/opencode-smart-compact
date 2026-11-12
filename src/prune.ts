@@ -63,13 +63,55 @@ export function serializeResult(value: unknown): string {
   }
 }
 
-/** Build the notice text that replaces a pruned tool result. */
+/**
+ * Build the notice text that replaces a pruned tool result.
+ *
+ * The notice is the agent's ONLY pointer to the original output, so it has to
+ * carry the whole recovery path: the tool to call (`read_omitted_content`),
+ * the argument to pass (`contentId`), and the exact id to pass. It also states
+ * that the original is RECOVERABLE rather than lost — without that sentence an
+ * agent reads the notice as a deletion, never restores the output, and the
+ * pruned result is effectively lost for that turn even though the store still
+ * holds it.
+ */
 export function omissionNotice(id: string, name: string | undefined, tokens: number): string {
   const tool = name ? ` from \`${name}\`` : "";
   return (
     `[omitted tool output${tool} — ~${tokens} tokens. ` +
-    `Content ID: ${id}. Call read_omitted_content with this ID if the original is required.]`
+    `The original output is RECOVERABLE, not lost: it is cached under Content ID ${id}. ` +
+    `To restore it, call the \`read_omitted_content\` tool with the argument ` +
+    `\`contentId: "${id}"\`.]`
   );
+}
+
+/**
+ * Lifecycle status of one tool-result part, as far as the plugin can see it.
+ *
+ * Only a completed result may be pruned or discarded. A pending call has no
+ * finished payload to replace, and an errored call carries the failure text
+ * the agent needs to diagnose the failure — replacing it with a notice would
+ * hide the reason the call failed. The model-visible part shape carries the
+ * outcome on `result.type` ("text", "json", "content", "error"); hosts that
+ * also attach the richer session state expose `state.status` ("pending",
+ * "running", "completed", "error"), which wins when both are present.
+ */
+export type ToolResultStatus = "completed" | "pending" | "error";
+
+/**
+ * Read the lifecycle status of a tool-result part. Never throws: an unknown or
+ * malformed shape is treated as completed, because the prune decision still
+ * needs a payload to measure and the original stays recoverable either way.
+ */
+export function toolResultStatus(part: Part): ToolResultStatus {
+  const state = part.state as { status?: unknown } | undefined;
+  const status = typeof state?.status === "string" ? state.status : undefined;
+  if (status === "pending" || status === "running") return "pending";
+  if (status === "error") return "error";
+  const result = part.result as { type?: unknown } | undefined;
+  const type = typeof result?.type === "string" ? result.type : undefined;
+  if (type === "pending" || type === "running") return "pending";
+  if (type === "error") return "error";
+  return "completed";
 }
 
 /** Allocate the next monotonic omission id and advance the counter. */
@@ -125,6 +167,10 @@ export function preserveWindow(messages: Msg[], preserveRecentTurns: number): Se
  * The preserve-recent window is checked before any prune decision: results
  * inside the window keep their full text. Over-long results outside the
  * window hit the truncate cap and are cached in full with an omission notice.
+ *
+ * Only completed results are eligible: a pending call has no finished payload
+ * and an errored call carries the failure text the agent needs, so both are
+ * left exactly as the provider wrote them.
  */
 export function pruneToolResults(
   messages: Msg[],
@@ -146,6 +192,11 @@ export function pruneToolResults(
       const callId = partCallId(part);
       if (!callId || state.omittedCalls[callId]) continue;
       const name = partName(part);
+      // Only a completed result may be pruned or discarded: a pending call has
+      // no finished payload yet, and an errored call carries the failure text
+      // the agent needs to diagnose the failure. Both stay exactly as the
+      // provider wrote them.
+      if (toolResultStatus(part) !== "completed") continue;
       const result = part.result as { type?: string; value?: unknown } | undefined;
       const text = serializeResult(result?.value);
 
@@ -253,13 +304,15 @@ export function applyOmissions(
 
 /**
  * Fail-closed notice for a pruned result whose cached original is gone
- * (cleared by a newer compaction). Names the missing id and tells the
- * reader to rerun the tool instead of trusting a phantom restore.
+ * (cleared by a newer compaction, or evicted from the bounded store). Names the
+ * missing id and the tool that cannot restore it, and tells the reader to
+ * rerun the source tool instead of trusting a phantom restore.
  */
 export function missingOmissionNotice(id: string): string {
   return (
     `[omitted tool output unavailable — the cached original for Content ID: ${id} ` +
-    `was cleared by a newer compaction. Rerun the tool to reproduce it.]`
+    `was cleared by a newer compaction, so it is no longer recoverable through ` +
+    `read_omitted_content. Rerun the tool to reproduce it.]`
   );
 }
 

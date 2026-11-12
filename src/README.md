@@ -6,10 +6,10 @@ Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, 
 
 - `index.ts` — setup, runPrune, measureVisibleCost, notify, per-request window resolution, runAwareness. No transcript mutation.
 - `actions.ts` — shared `compactNow`, `scheduleTrim`, `parseCompactArgs`, stats/budget/pointer formatters. Single source so tool + commands cannot drift.
-- `awareness.ts` — context-pressure awareness: pure measurement of the model-visible messages, window resolution (registry, configured fallback, configured cap), ratio and absolute-token thresholds, latch decision, agent-facing reminder text. No I/O, no state.
+- `awareness.ts` — context-pressure awareness: pure measurement of the model-visible messages, window resolution (registry, configured fallback, configured cap), ratio and absolute-token thresholds, latch decision, agent-facing reminder text including the named reclaim action, and the emergency re-fire policy. No I/O, no state.
 - `plan.ts` — `buildTurns` groups history by user boundary, `selectTurns` excludes recent window.
 - `summarize.ts` — batched `summarizeTurns` via `ctx.generate.text`, `<summary id>` parse, heuristic fallback counter.
-- `prune.ts` — `pruneToolResults`, `applyOmissions`, rank, truncate caps, discard/protected rules; writes originals to the omission store.
+- `prune.ts` — `pruneToolResults`, `applyOmissions`, rank, truncate caps, discard/protected rules, the completed-only guard for pending and errored calls; writes originals to the omission store and replaces each one with a notice that names the recovery path.
 - `omissions.ts` — bounded per-session file store for pruned originals, legacy migration, retrieval cap.
 - `strategies.ts` — dedup identical calls, purge stale errors, strip long reasoning.
 - `config.ts` — defaults ← global ← project JSONC, validation warnings, budget derivation/resolution, budget state.
@@ -23,7 +23,9 @@ Entry `index.ts` wires OpenCode V2 plugin: `session.hook("context")` transform, 
 - Never import adapters in core. Depend on `Ctx` abstraction.
 - Storage keys `session:<id>` only. No cross-session reads.
 - User messages verbatim. Preserve-recent window always kept.
-- Awareness is advisory: it reminds, it never compacts, never aborts a step, never mutates history. Auto-trim is the one automatic action and is lossless; it is armed at `autoTrimRatio 0.55` by default with the existing one-trim-per-period latch.
+- Pending and errored tool calls are never pruned: `toolResultStatus` reads the outcome from the part (`result.type`, or `state.status` when the host attaches it) and the prune pass only ever touches a completed result.
+- Every pruning notice names the recovery path — the `read_omitted_content` tool, the `contentId` argument, and the exact Content ID — and states that the original is recoverable, not lost. The fail-closed twin (`missingOmissionNotice`) names the same id and says the original is gone, so the two notices cannot be confused.
+- Awareness is advisory: it reminds, it never compacts, never aborts a step, never mutates history. Auto-trim is the one automatic action and is lossless; it is armed at `autoTrimRatio 0.55` by default with the existing one-trim-per-period latch. The reminder names the reclaim action next to the pressure ratio, and the emergency level re-fires on every request while the pressure holds, with the hysteresis unchanged.
 - Session state never holds full tool-output originals: they live in the bounded file store under the plugin data dir, and every retrieval is capped at 20000 characters.
 - Thresholds that depend on the window resolve through one `resolveAwarenessWindow` call per request, so the emergency budget and the awareness ratio cannot use different denominators.
 - `awareness.contextWindowTokens` caps a larger registry window (`min(registry, configured)`) instead of being a registry-miss-only fallback, and `warnAtTokens` / `emergencyAtTokens` add absolute lines because a ratio is unreachable on a very large window. The fired level is the stronger of the two signals.

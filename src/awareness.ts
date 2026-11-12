@@ -307,6 +307,33 @@ export function shouldFireAwareness(
 }
 
 /**
+ * Whether a reminder should be pushed for the current request.
+ *
+ * The warn level keeps the single-shot latch: it fires on the first crossing
+ * and re-arms only once the fill grew by `rearmStep` (or the level escalated),
+ * so a session hovering at the threshold is not nudged on every request.
+ *
+ * The emergency level re-fires on EVERY request while the pressure stays at or
+ * above the emergency line. A heads-down agent that receives one emergency
+ * nudge and then silence has no signal left at exactly the moment the signal
+ * matters most, so the single-shot latch is bypassed here. The hysteresis is
+ * untouched: the latch is still cleared only once every armed signal fell
+ * below its re-arm line, so the message never oscillates between levels, and
+ * a downgrade from emergency to warn stays silent instead of re-nudging.
+ */
+export function shouldFireAwarenessReminder(
+  ratio: number,
+  level: AwarenessWarnLevel,
+  prev: AwarenessPrev,
+  rearmStep: number,
+): boolean {
+  // Emergency bypasses the growth latch on purpose: the pressure is still at
+  // or above the emergency line, which is the condition the re-fire exists for.
+  if (level === "emergency") return true;
+  return shouldFireAwareness(ratio, level, prev, rearmStep);
+}
+
+/**
  * Whether the pressure is high enough to schedule a lossless tool-output trim.
  *
  * Trimming only replaces bulky completed tool results with a notice whose
@@ -355,17 +382,35 @@ export function autoTrimResetLine(autoTrimRatio: number, rearmStep: number): num
 }
 
 /**
+ * The concrete reclaim action, named next to the pressure ratio.
+ *
+ * The ratio alone tells the agent how much pressure there is but not what to
+ * do about it, so the reminder names the plugin's own reclaim strategies by
+ * their real names — `trim` (lossless: bulky tool output becomes a notice and
+ * every original stays recoverable) and `compact` (also summarizes old
+ * assistant turns). Those are exactly the `mode` values the `compact_context`
+ * tool accepts, so the sentence reads as a call the agent can make verbatim
+ * instead of a hint it has to translate.
+ */
+export function buildReclaimAction(level: AwarenessWarnLevel): string {
+  return level === "emergency"
+    ? "Reclaim action: call `compact_context` NOW with `mode: \"compact\"` (summarizes old assistant turns and prunes bulky tool output); `mode: \"trim\"` is the lossless half (prunes tool output only, every original stays recoverable through `read_omitted_content`)."
+    : "Reclaim action: call `compact_context` with `mode: \"trim\"` for a lossless reclaim (prunes bulky tool output; every original stays recoverable through `read_omitted_content`), or `mode: \"compact\"` to also summarize old assistant turns (user messages stay verbatim).";
+}
+
+/**
  * The unmissable directive addressed to the agent.
  *
  * The first line is the action itself — the exact tool to call, stated as a
  * command, not a suggestion — because the reminder rides on the outgoing
  * model call as one system part and is easy to skim past mid-implementation.
  * It states the current fill of the context window with the numbers behind
- * it, what is lost if it is ignored (overflow drops in-flight work and it
- * cannot be recovered), names the exact tool to call and where to find it,
- * and tells the agent to re-orient on the project before compacting so the
- * thread of the request survives. It keeps the whole thing advisory: the
- * agent decides when it is safe to compact and no step is ever aborted.
+ * it, names the concrete reclaim action next to that ratio, what is lost if
+ * it is ignored (overflow drops in-flight work and it cannot be recovered),
+ * names the exact tool to call and where to find it, and tells the agent to
+ * re-orient on the project before compacting so the thread of the request
+ * survives. It keeps the whole thing advisory: the agent decides when it is
+ * safe to compact and no step is ever aborted.
  */
 export function buildAwarenessMessage(args: {
   usedTokens: number;
@@ -416,6 +461,10 @@ export function buildAwarenessMessage(args: {
     firstLine,
     "",
     `[smart-compact] CONTEXT PRESSURE - ${ratioPct}% of the context window is in use (about ${usedTokens} of ${limitTokens} measured tokens).`,
+    // The ratio alone is a measurement, not an instruction: the concrete
+    // reclaim action sits on the very next line so the agent reads what to do
+    // in the same breath as how much pressure there is.
+    buildReclaimAction(level),
     ...(note ? [note] : []),
     ...(absoluteNote ? [absoluteNote] : []),
     `Status: ${status}. The measured fill is a lower bound: it counts only the model-visible messages, while provider system prompts and tool schemas are invisible to the plugin, so the true usage is higher than this number.`,
