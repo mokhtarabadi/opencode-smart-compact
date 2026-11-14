@@ -104,7 +104,10 @@ async function runPrune(
       `measured ~${measured}); pruning anyway. Raise tokens.emergencyBudgetTokens ` +
       `or tokens.emergencyBudgetRatio to silence this warning.`;
     console.warn(text);
-    await notify(ctx, sessionID, text);
+    // Never call notify / ctx.session.synthetic from within runPrune: runPrune
+    // runs synchronously on the session.hook("context") pipeline, where
+    // re-entering ctx.session.synthetic blocks on the active session worker
+    // and causes an OpenCode server deadlock and OpenChamber watchdog restart.
   }
   const strategies = applyStrategies(messages, config);
   const pruned = pruneToolResults(messages, state, config, sessionID);

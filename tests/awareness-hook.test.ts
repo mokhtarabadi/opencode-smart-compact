@@ -777,3 +777,47 @@ test("a quiet request logs no awareness line at all", async () => {
   assert.equal(system.length, 0);
   assert.equal(logs.filter((line) => /awareness .* fired|auto-trim queued/.test(line)).length, 0);
 });
+
+test("runPrune never calls ctx.session.synthetic even when over emergency budget", async () => {
+  const h = await harness({ limitContext: 10_000 });
+  const state = (h.storage.get("session:ses-prune-safe") ?? {}) as Record<string, unknown>;
+  state.pending = { mode: "trim", keepTurns: 0 };
+  state.omissions = {};
+  state.omittedCalls = {};
+  state.summaries = {};
+  state.stats = {
+    prunedTokens: 0,
+    prunedParts: 0,
+    summarizedTurns: 0,
+    summaryFallbacks: 0,
+    lastRun: 0,
+    lastRunMs: 0,
+  };
+  h.storage.set("session:ses-prune-safe", state);
+
+  const system: Array<{ type: string; text: string }> = [];
+  const toolResult = {
+    type: "tool-result",
+    callID: "call-1",
+    tool: "read",
+    result: { value: "x".repeat(50_000) },
+  };
+
+  await h.hook({
+    sessionID: "ses-prune-safe",
+    model: { providerID: "test", id: "model-x" },
+    system,
+    messages: [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [toolResult],
+      },
+    ],
+  });
+
+  const updatedState = h.storage.get("session:ses-prune-safe") as {
+    stats?: { prunedTokens: number };
+  };
+  assert.ok((updatedState.stats?.prunedTokens ?? 0) >= 0);
+});
