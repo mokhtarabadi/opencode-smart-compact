@@ -6,3 +6,4 @@ tasks/.sessions/
 
 # Custom Context MCP reports
 context-reports/
+.opencode/goals/
